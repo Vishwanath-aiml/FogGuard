@@ -172,6 +172,11 @@ class SerialHardwareBridge:
 
                             hardware_source.receive(payload)
 
+                            from app.simulation.engine import simulation_engine
+                            if simulation_engine.is_running:
+                                await simulation_engine.stop()
+                                logger.info("Stopped simulation engine: live serial hardware stream active")
+
                             async with AsyncSessionLocal() as session:
                                 await process_telemetry(payload, session, source="hardware")
 
@@ -222,25 +227,35 @@ class SerialHardwareBridge:
             sensor_id = f"S{idx}"
             dist_val = float(line_match.group(2)) if line_match.group(2) else None
 
-            if idx > self._max_sensor_seen:
-                self._max_sensor_seen = idx
-
-            self._sensor_buffer[sensor_id] = dist_val
-
-            # When full scan has completed (Sensor 6 or Sensor 4)
-            is_six_sensor_mode = self._max_sensor_seen >= 5
-            target_flush = 6 if is_six_sensor_mode else 4
-
-            if idx == target_flush or len(self._sensor_buffer) >= target_flush:
-                active_map = ZONE_MAP_6 if is_six_sensor_mode else ZONE_MAP_4
+            # If a 4-sensor cycle completed and next S1 arrives, flush the 4-sensor payload
+            if idx == 1 and len(self._sensor_buffer) >= 4 and all(int(k[1:]) <= 4 for k in self._sensor_buffer):
                 sensors = []
-                for i in range(1, target_flush + 1):
+                for i in range(1, 5):
                     sid = f"S{i}"
                     dist = self._sensor_buffer.get(sid)
                     detected = (dist is not None and dist <= 150.0)
                     sensors.append({
                         "sensor_id": sid,
-                        "zone": active_map[sid],
+                        "zone": ZONE_MAP_4[sid],
+                        "distance_cm": dist,
+                        "obstacle_detected": detected
+                    })
+                self._sensor_buffer.clear()
+                self._sensor_buffer[sensor_id] = dist_val
+                return {"sensors": sensors, "traffic_signal": {"state": "GREEN", "duration_seconds": 30}}
+
+            self._sensor_buffer[sensor_id] = dist_val
+
+            # When Sensor 6 arrives, flush the full 6-sensor payload
+            if idx == 6 or len(self._sensor_buffer) >= 6:
+                sensors = []
+                for i in range(1, 7):
+                    sid = f"S{i}"
+                    dist = self._sensor_buffer.get(sid)
+                    detected = (dist is not None and dist <= 150.0)
+                    sensors.append({
+                        "sensor_id": sid,
+                        "zone": ZONE_MAP_6[sid],
                         "distance_cm": dist,
                         "obstacle_detected": detected
                     })

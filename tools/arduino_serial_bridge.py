@@ -14,12 +14,13 @@ Supports:
      Sensor 5: 200.00 cm
      Sensor 6: 15.50 cm
 
+The port is held while this script runs. Stop it (Ctrl+C) before flashing the board.
+
 Usage:
-    python tools/arduino_serial_bridge.py [--port COM3] [--baud 115200] [--url http://localhost:8000/api/v1/iot/telemetry]
+    python tools/arduino_serial_bridge.py [--port COM5] [--baud 115200] [--url http://localhost:8000/api/v1/iot/telemetry]
 """
 
 import sys
-import time
 import json
 import re
 import argparse
@@ -33,6 +34,10 @@ except ImportError:
     print("Please install requirements: pip install pyserial requests")
     sys.exit(1)
 
+NUM_SENSORS = 6
+DETECT_THRESHOLD_CM = 150.0
+
+# Must match where S1-S6 are physically mounted.
 ZONE_MAP_6 = {
     "S1": "front_left",
     "S2": "front_center_left",
@@ -42,15 +47,11 @@ ZONE_MAP_6 = {
     "S6": "right_side",
 }
 
-ZONE_MAP_4 = {
-    "S1": "front_left",
-    "S2": "front_center",
-    "S3": "front_right",
-    "S4": "roof_center",
-}
+SENSOR_RE = re.compile(
+    r"Sensor\s+([1-6])\s*:\s*(?:([0-9.]+)\s*cm|No Echo)", re.IGNORECASE
+)
 
 sensor_buffer = {}
-max_sensor_seen = 4
 
 
 def find_arduino_port():
@@ -65,48 +66,49 @@ def find_arduino_port():
 
 
 def parse_line(line: str):
-    global sensor_buffer, max_sensor_seen
+    global sensor_buffer
     line = line.strip()
     if not line:
         return None
 
-    # Format 1: Full JSON line
+    # Format 1: full JSON line
     if line.startswith("{") and line.endswith("}"):
         try:
             return json.loads(line)
         except Exception:
             pass
 
-    # Format 2: Line-by-line Arduino monitor format: 'Sensor <index>: <distance> cm' or 'Sensor <index>: No Echo'
-    m = re.match(r"Sensor\s+([1-6])\s*:\s*(?:([0-9.]+)\s*cm|No Echo)", line, re.IGNORECASE)
-    if m:
-        idx = int(m.group(1))
-        sensor_id = f"S{idx}"
-        dist_val = float(m.group(2)) if m.group(2) else None
-        sensor_buffer[sensor_id] = dist_val
+    # Format 2: 'Sensor <n>: <distance> cm' or 'Sensor <n>: No Echo'
+    m = SENSOR_RE.match(line)
+    if not m:
+        return None
 
-        if idx > max_sensor_seen:
-            max_sensor_seen = idx
+    idx = int(m.group(1))
+    if idx == 1:
+        sensor_buffer = {}  # a new sweep starts: drop any leftovers
+    sensor_buffer[f"S{idx}"] = float(m.group(2)) if m.group(2) else None
 
-        is_six_sensor_mode = max_sensor_seen >= 5
-        target_flush = 6 if is_six_sensor_mode else 4
+    if idx != NUM_SENSORS:
+        return None
 
-        if idx == target_flush or len(sensor_buffer) >= target_flush:
-            active_map = ZONE_MAP_6 if is_six_sensor_mode else ZONE_MAP_4
-            sensors = []
-            for i in range(1, target_flush + 1):
-                sid = f"S{i}"
-                dist = sensor_buffer.get(sid)
-                sensors.append({
-                    "id": sid,
-                    "zone": active_map[sid],
-                    "dist": dist,
-                    "det": (dist is not None and dist <= 150.0)
-                })
-            sensor_buffer = {}
-            return {"traffic": "GREEN", "dur": 30, "sensors": sensors}
+    # Sensor 6 arrived: flush only if the whole sweep is present
+    if len(sensor_buffer) < NUM_SENSORS:
+        sensor_buffer = {}
+        return None
 
-    return None
+    sensors = []
+    for i in range(1, NUM_SENSORS + 1):
+        sid = f"S{i}"
+        dist = sensor_buffer[sid]
+        sensors.append({
+            "id": sid,
+            "zone": ZONE_MAP_6[sid],
+            "dist": dist,
+            "det": (dist is not None and dist <= DETECT_THRESHOLD_CM),
+        })
+    sensor_buffer = {}
+    # No "traffic" key: the bridge must not force the signal to GREEN.
+    return {"sensors": sensors}
 
 
 def main():
@@ -134,7 +136,12 @@ def main():
 
     try:
         while True:
-            raw_line = ser.readline()
+            try:
+                raw_line = ser.readline()
+            except serial.SerialException as e:
+                print(f"[ERROR] Serial connection lost: {e}")
+                break
+
             if not raw_line:
                 continue
 
@@ -151,23 +158,27 @@ def main():
                         "sensor_id": s.get("id"),
                         "zone": s.get("zone", "front_center"),
                         "distance_cm": s.get("dist"),
-                        "obstacle_detected": s.get("det", False)
+                        "obstacle_detected": s.get("det", False),
                     }
                     for s in data["sensors"]
                 ],
                 "traffic_signal": {
                     "state": data.get("traffic", "GREEN"),
-                    "duration_seconds": data.get("dur", 30)
-                } if "traffic" in data else None
+                    "duration_seconds": data.get("dur", 30),
+                } if "traffic" in data else None,
             }
 
             try:
                 resp = requests.post(args.url, json=payload, timeout=2.0)
                 if resp.status_code == 200:
-                    dists = [f"{s['sensor_id']}={s['distance_cm']:.1f}cm" for s in payload["sensors"] if s['distance_cm'] is not None]
+                    dists = [
+                        f"{s['sensor_id']}={s['distance_cm']:.1f}cm"
+                        for s in payload["sensors"]
+                        if s["distance_cm"] is not None
+                    ]
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] 3D Cuboids Updated: {', '.join(dists) if dists else 'All Clear'}")
                 else:
-                    print(f"[WARN] Backend responded with HTTP {resp.status_code}")
+                    print(f"[WARN] Backend responded with HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
                 print(f"[WARN] Failed to post telemetry: {e}")
 

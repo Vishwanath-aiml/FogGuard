@@ -1,51 +1,56 @@
-"""IoT Telemetry endpoint — receives data from ESP32 or simulation.
-
-OPTIMIZATIONS applied:
-- Phase 2: Single commit at end of process_telemetry (was 4 separate commits)
-- Phase 4: classify_distance called once per sensor, reused for DB + broadcast
-- Phase 5: DB writes are enqueued to the batch writer; broadcast is immediate
+"""IoT Telemetry endpoint — receives data from ESP32, direct USB serial, or simulation.
 """
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
+import copy
+import logging
 
 from app.database.db import get_db, AsyncSessionLocal
 from app.schemas.schemas import TelemetryPayload, SimulationControl
 from app.services import data_service
 from app.services.data_service import precompute_classifications
+from app.services.warning_engine import warning_engine
 from app.services.write_queue import write_queue
 from app.simulation.engine import simulation_engine, SCENARIOS
 from app.hardware.source import hardware_source
 from app.core.websocket_manager import manager
 from app.core.config import settings
-import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Shared mutable state for last telemetry
 _last_telemetry: dict = {}
-_warning_id_seq: int = 1000
+
+
+def get_last_telemetry() -> dict:
+    """Safe accessor for the most recently broadcast telemetry packet."""
+    global _last_telemetry
+    return copy.deepcopy(_last_telemetry) if _last_telemetry else {}
 
 
 async def process_telemetry(
     payload: TelemetryPayload, db: AsyncSession, source: str = "hardware"
 ):
     """
-    Core telemetry processing — classify, broadcast, persist.
-
-    OPTIMIZATION: The hot path (classify + broadcast) runs first with zero
-    disk I/O.  DB persistence is either done in-line with a single commit
-    or offloaded to the batch write queue.
+    Core telemetry processing pipeline:
+    1. Precompute distance classifications (once per sensor).
+    2. Evaluate obstacle warning conditions (once per sensor).
+    3. Persist new WarningEvents directly to SQLite to generate real database IDs.
+    4. Broadcast state immediately over WebSocket with genuine database IDs.
+    5. Persist raw sensor readings, obstacle events, traffic changes, and device status.
     """
     global _last_telemetry
 
-    now = datetime.now(timezone.utc)
+    now = payload.timestamp or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
 
-    # ── Phase 4: classify ONCE, reuse everywhere ──
+    # 1. Precompute classifications once
     levels = precompute_classifications(payload)
 
-    # ── Build WS broadcast message (zero I/O) ──
+    # 2. Build sensor list for broadcast
     sensor_list = []
     for s, (level, _zone) in zip(payload.sensors, levels):
         sensor_list.append({
@@ -53,34 +58,44 @@ async def process_telemetry(
             "zone": s.zone,
             "distance_cm": s.distance_cm,
             "obstacle_detected": s.obstacle_detected,
-            "warning_level": level,            # reused — no second classify call
+            "warning_level": level,
         })
 
-    # Warnings (in-memory only — warning_engine is pure Python)
+    # 3. Warning evaluation — exactly once per reading
     thresholds = {
         "critical_cm": settings.CRITICAL_THRESHOLD_CM,
         "warning_cm": settings.WARNING_THRESHOLD_CM,
         "caution_cm": settings.CAUTION_THRESHOLD_CM,
         "max_range_cm": settings.MAX_RANGE_CM,
     }
-    warnings_out = []
+    raw_warnings = []
     for s in payload.sensors:
-        w = data_service.warning_engine.process_sensor(
+        w = warning_engine.process_sensor(
             s.sensor_id, s.zone, s.distance_cm,
             thresholds=thresholds, now=now,
         )
         if w:
-            _warning_id_seq += 1
-            warnings_out.append({
-                "id": _warning_id_seq,  # Deterministic unique ID for WebSocket/React keys
-                "sensor_id": w["sensor_id"],
-                "zone": w["zone"],
-                "distance_cm": w["distance_cm"],
-                "warning_level": w["warning_level"],
-                "warning_message": w["warning_message"],
-                "acknowledged": False,
-                "timestamp": now.isoformat(),
-            })
+            raw_warnings.append(w)
+
+    # Persist warning events to SQLite immediately to get true autoincrement primary keys
+    persisted_warnings = []
+    if raw_warnings:
+        persisted_warnings = await data_service.save_warning_events(db, raw_warnings)
+        await db.commit()  # Ensure warnings exist in DB so frontend can immediately acknowledge
+
+    warnings_out = [
+        {
+            "id": w.id,
+            "sensor_id": w.sensor_id,
+            "zone": w.zone,
+            "distance_cm": w.distance_cm,
+            "warning_level": w.warning_level,
+            "warning_message": w.warning_message,
+            "acknowledged": w.acknowledged,
+            "timestamp": w.timestamp.isoformat() if hasattr(w.timestamp, "isoformat") else str(w.timestamp),
+        }
+        for w in persisted_warnings
+    ]
 
     traffic_out = None
     if payload.traffic_signal:
@@ -89,48 +104,48 @@ async def process_telemetry(
             "duration_seconds": payload.traffic_signal.duration_seconds,
         }
 
+    is_sim = (source == "simulation")
     broadcast_msg = {
         "type": "telemetry",
         "source": source,
-        "timestamp": (payload.timestamp or now).isoformat(),
+        "timestamp": now.isoformat(),
         "sensors": sensor_list,
         "traffic_signal": traffic_out,
         "new_warnings": warnings_out,
-        "simulation_mode": settings.SIMULATION_MODE or source == "simulation",
+        "simulation_mode": is_sim,
     }
 
     _last_telemetry = broadcast_msg
 
-    # ── Broadcast IMMEDIATELY (no disk I/O yet) ──
+    # 4. Immediate WebSocket broadcast (sub-millisecond)
     await manager.broadcast(broadcast_msg)
 
-    # ── Phase 5: Enqueue DB writes to the batch writer ──
-    # The write queue flushes periodically in the background.
-    # For endpoints that need synchronous DB confirmation, we fall through
-    # to the in-line path below.
-    if write_queue._running:
-        write_queue.enqueue(payload)
+    # 5. Persist high-frequency raw sensor data, traffic signal, and device status
+    if write_queue.is_running:
+        write_queue.enqueue({"payload": payload, "levels": levels})
     else:
-        # Fallback: write in-line with a single commit (Phase 2)
+        # Fallback inline persistence
         await data_service.save_sensor_readings(db, payload, levels)
-        await data_service.save_warnings(db, payload, now)
         await data_service.save_traffic_event(db, payload)
         await data_service.update_device_status(db, payload.device_id)
-        await db.commit()  # ← ONE commit instead of four
+        await db.commit()
 
 
-@router.post("/iot/telemetry", summary="Receive telemetry from ESP32 or simulation")
+@router.post("/iot/telemetry", summary="Receive telemetry from ESP32 or hardware")
 async def receive_telemetry(
     payload: TelemetryPayload,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Main endpoint for receiving sensor telemetry.
-    ESP32 sends data here via Wi-Fi.
-    Payload is validated, saved, and broadcast to all WebSocket clients.
+    Main endpoint for receiving sensor telemetry from physical hardware (ESP32 / Wi-Fi).
     """
     hardware_source.receive(payload)
+
+    # If simulation was running, stop it so physical hardware takes over exclusively
+    if simulation_engine.is_running:
+        await simulation_engine.stop()
+        logger.info("Paused simulation engine: live hardware telemetry received on /iot/telemetry")
+
     await process_telemetry(payload, db, source="hardware")
     return {"status": "ok", "processed_sensors": len(payload.sensors)}
 
