@@ -1,14 +1,14 @@
 // 3D Obstacle Visualization using React Three Fiber
-// Renders the vehicle, sensor beams, and ADAS 3D bounding cuboids for detected vehicles in fog
-import { Component, useRef, useMemo, useState, type ReactNode, type ErrorInfo } from 'react';
+// Real-time zero-allocation Three.js pipeline with ADAS bounding cuboids & live HUD diagnostics
+import { Component, useRef, useMemo, useState, useEffect, type ReactNode, type ErrorInfo } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Text, Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import type { SensorReading } from '../../types';
 import { warningLevelColor } from '../../utils';
+import { useStore } from '../../store/useStore';
 
 // Sensor zone 3D positions (relative to vehicle center)
-// Vehicle is ~4 units long, 2 units wide (front bumper at z = -2.0)
 const ZONE_POSITIONS: Record<string, [number, number, number]> = {
   front_left: [-1.0, 0, -2.5],
   front_center: [0, 0, -2.5],
@@ -33,6 +33,26 @@ const ZONE_DIRECTIONS: Record<string, [number, number, number]> = {
 
 const MAX_RANGE = 400;
 const SCALE = 0.025; // cm to Three.js units (400cm = 10 units in 3D world)
+
+// ─── Module-Level Shared Geometries (Zero-Garbage-Collection in Hot Loop) ─────
+const STANDARD_BOX_GEOM = new THREE.BoxGeometry(1.6, 1.1, 2.4);
+const ROOF_BOX_GEOM = new THREE.BoxGeometry(1.8, 1.2, 2.4);
+const STANDARD_EDGES_GEOM = new THREE.EdgesGeometry(STANDARD_BOX_GEOM);
+const ROOF_EDGES_GEOM = new THREE.EdgesGeometry(ROOF_BOX_GEOM);
+const CORNER_BOX_GEOM = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+const RADAR_RING_GEOM = new THREE.RingGeometry(0.9, 1.05, 32);
+const BADGE_PLANE_GEOM = new THREE.PlaneGeometry(1.4, 0.35);
+const BEAM_CYLINDER_GEOM = new THREE.CylinderGeometry(0.3, 0.3, 1, 6);
+const SENSOR_DOT_GEOM = new THREE.SphereGeometry(0.08, 12, 12);
+
+// Reusable basic materials
+const WHITE_BASIC_MAT = new THREE.MeshBasicMaterial({ color: '#ffffff' });
+const BADGE_BG_MAT = new THREE.MeshBasicMaterial({
+  color: '#020818',
+  transparent: true,
+  opacity: 0.85,
+  side: THREE.DoubleSide,
+});
 
 // ─── React Error Boundary for 3D WebGL Canvas ───────────────────────────────
 interface ErrorBoundaryProps {
@@ -162,19 +182,24 @@ function SensorBeam({ zone, sensor }: { zone: string; sensor: SensorReading }) {
     : [0.04, beamLength, 0.04];
 
   return (
-    <mesh ref={meshRef} position={midPoint} rotation={rotation} scale={scale}>
-      <cylinderGeometry args={[0.3, 0.3, 1, 6]} />
+    <mesh
+      ref={meshRef}
+      geometry={BEAM_CYLINDER_GEOM}
+      position={midPoint}
+      rotation={rotation}
+      scale={scale}
+    >
       <meshStandardMaterial color={color} transparent opacity={0.15} />
     </mesh>
   );
 }
 
-// ─── 3D Vehicle Bounding Cuboid Revealed in Fog ──────────────────────────────
+// ─── 3D Vehicle Bounding Cuboid Revealed in Fog (Zero GC, Ref-Updated) ────────
 function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading }) {
   const groupRef = useRef<THREE.Group>(null);
-  const meshRef = useRef<THREE.Mesh>(null);
+  const bodyMeshRef = useRef<THREE.Mesh>(null);
+  const ringMeshRef = useRef<THREE.Mesh>(null);
 
-  // Hook 1: Check obstacle condition (UNCONDITIONAL)
   const hasObstacle =
     sensor.distance_cm !== null &&
     sensor.distance_cm > 0 &&
@@ -185,61 +210,45 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
   const safeDistance = Math.min(sensor.distance_cm ?? MAX_RANGE, MAX_RANGE);
   const dist = safeDistance * SCALE;
 
-  // Obstacle Dimensions (Vehicle size)
   const isRoofSensor = zone === 'roof_center';
-  const size: [number, number, number] = isRoofSensor
-    ? [1.8, 1.2, 2.4]  // Overhead / tall truck / bridge obstacle
-    : [1.6, 1.1, 2.4]; // Standard vehicle cuboid ahead
-
+  const size: [number, number, number] = isRoofSensor ? [1.8, 1.2, 2.4] : [1.6, 1.1, 2.4];
   const centerY = isRoofSensor ? 1.4 : size[1] / 2;
-
-  const obstaclePos: [number, number, number] = [
-    startPos[0] + dir[0] * dist,
-    centerY,
-    startPos[2] + dir[2] * dist,
-  ];
 
   const color = warningLevelColor(sensor.warning_level);
   const isCritical = sensor.warning_level === 'CRITICAL';
   const isWarning = sensor.warning_level === 'WARNING';
 
-  // Hook 2: Memoize geometries to eliminate memory churn / buffer re-creations
-  const edgesGeom = useMemo(() => {
-    const box = new THREE.BoxGeometry(...size);
-    const edges = new THREE.EdgesGeometry(box);
-    box.dispose();
-    return edges;
-  }, [isRoofSensor]);
+  // Select pre-allocated geometries
+  const boxGeom = isRoofSensor ? ROOF_BOX_GEOM : STANDARD_BOX_GEOM;
+  const edgesGeom = isRoofSensor ? ROOF_EDGES_GEOM : STANDARD_EDGES_GEOM;
 
-  // Hook 3: Frame loop (UNCONDITIONAL - never violated by early returns)
+  // Frame Loop: Smooth hover motion and direct transform updates
   useFrame(({ clock }) => {
+    if (!groupRef.current) return;
+
+    groupRef.current.visible = hasObstacle;
     if (!hasObstacle) return;
 
-    if (meshRef.current && meshRef.current.material) {
-      const t = clock.getElapsedTime();
+    const t = clock.getElapsedTime();
+    // Direct position update without JSX churn
+    groupRef.current.position.set(
+      startPos[0] + dir[0] * dist,
+      centerY + 0.02 * Math.sin(t * 3),
+      startPos[2] + dir[2] * dist
+    );
+
+    if (bodyMeshRef.current && bodyMeshRef.current.material) {
+      const mat = bodyMeshRef.current.material as THREE.MeshStandardMaterial;
       const pulseSpeed = isCritical ? 8 : isWarning ? 5 : 2;
       const pulse = 0.5 + 0.5 * Math.sin(t * pulseSpeed);
-
-      (meshRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity =
-        isCritical ? 0.6 + 0.4 * pulse : 0.3 + 0.2 * pulse;
-
-      // Subtle hover/suspension motion
-      if (groupRef.current) {
-        groupRef.current.position.y = obstaclePos[1] + 0.02 * Math.sin(t * 3);
-      }
+      mat.emissiveIntensity = isCritical ? 0.6 + 0.4 * pulse : 0.3 + 0.2 * pulse;
     }
   });
 
-  // Early return is now STRICTLY AFTER all React hooks are executed
-  if (!hasObstacle) {
-    return null;
-  }
-
   return (
-    <group ref={groupRef} position={obstaclePos}>
+    <group ref={groupRef} visible={hasObstacle}>
       {/* 1. Translucent Volumetric Vehicle Body */}
-      <mesh ref={meshRef}>
-        <boxGeometry args={size} />
+      <mesh ref={bodyMeshRef} geometry={boxGeom}>
         <meshStandardMaterial
           color={color}
           emissive={color}
@@ -258,38 +267,25 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
 
       {/* 3. Corner Brackets (Targeting Reticles) */}
       <group>
-        {/* Front-top corners */}
-        <mesh position={[size[0] / 2, size[1] / 2, -size[2] / 2]}>
-          <boxGeometry args={[0.15, 0.15, 0.15]} />
-          <meshBasicMaterial color="#ffffff" />
-        </mesh>
-        <mesh position={[-size[0] / 2, size[1] / 2, -size[2] / 2]}>
-          <boxGeometry args={[0.15, 0.15, 0.15]} />
-          <meshBasicMaterial color="#ffffff" />
-        </mesh>
-        {/* Front-bottom corners */}
-        <mesh position={[size[0] / 2, -size[1] / 2, -size[2] / 2]}>
-          <boxGeometry args={[0.15, 0.15, 0.15]} />
-          <meshBasicMaterial color="#ffffff" />
-        </mesh>
-        <mesh position={[-size[0] / 2, -size[1] / 2, -size[2] / 2]}>
-          <boxGeometry args={[0.15, 0.15, 0.15]} />
-          <meshBasicMaterial color="#ffffff" />
-        </mesh>
+        <mesh geometry={CORNER_BOX_GEOM} material={WHITE_BASIC_MAT} position={[size[0] / 2, size[1] / 2, -size[2] / 2]} />
+        <mesh geometry={CORNER_BOX_GEOM} material={WHITE_BASIC_MAT} position={[-size[0] / 2, size[1] / 2, -size[2] / 2]} />
+        <mesh geometry={CORNER_BOX_GEOM} material={WHITE_BASIC_MAT} position={[size[0] / 2, -size[1] / 2, -size[2] / 2]} />
+        <mesh geometry={CORNER_BOX_GEOM} material={WHITE_BASIC_MAT} position={[-size[0] / 2, -size[1] / 2, -size[2] / 2]} />
       </group>
 
       {/* 4. Ground Projection Radar Ring */}
-      <mesh position={[0, -size[1] / 2 + 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.9, 1.05, 32]} />
+      <mesh
+        ref={ringMeshRef}
+        geometry={RADAR_RING_GEOM}
+        position={[0, -size[1] / 2 + 0.02, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
+      >
         <meshBasicMaterial color={color} transparent opacity={0.6} side={THREE.DoubleSide} />
       </mesh>
 
       {/* 5. 3D Floating HUD Distance Badge */}
       <group position={[0, size[1] / 2 + 0.45, 0]}>
-        <mesh>
-          <planeGeometry args={[1.4, 0.35]} />
-          <meshBasicMaterial color="#020818" transparent opacity={0.85} side={THREE.DoubleSide} />
-        </mesh>
+        <mesh geometry={BADGE_PLANE_GEOM} material={BADGE_BG_MAT} />
         <Text
           position={[0, 0, 0.02]}
           fontSize={0.16}
@@ -318,8 +314,7 @@ function SensorIndicator({ zone, sensor }: { zone: string; sensor: SensorReading
 
   return (
     <group position={[pos[0], 0.05, pos[2]]}>
-      <mesh ref={indicatorRef} position={[0, 0.08, 0]}>
-        <sphereGeometry args={[0.08, 12, 12]} />
+      <mesh ref={indicatorRef} geometry={SENSOR_DOT_GEOM} position={[0, 0.08, 0]}>
         <meshStandardMaterial
           color={color}
           emissive={color}
@@ -350,14 +345,14 @@ function Scene({ sensors, fogDensity }: { sensors: SensorReading[]; fogDensity: 
 
   return (
     <>
-      {/* Atmospheric Fog Effect — keeps vehicle and obstacles sharp while fading distant background */}
+      {/* Atmospheric Fog Effect */}
       {fogDensity > 0 && (
         <fog
           attach="fog"
           args={[
             '#020818',
-            12, // Near: starts behind ego vehicle (vehicle is at dist ~12.8)
-            Math.max(30, 60 / Math.max(0.2, fogDensity)), // Far: normal ~60, heavy ~33
+            12,
+            Math.max(30, 60 / Math.max(0.2, fogDensity)),
           ]}
         />
       )}
@@ -414,24 +409,74 @@ interface ObstacleVisualizationProps {
 }
 
 export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
-  const [fogDensity, setFogDensity] = useState(1.0); // 0 = clear, 1 = normal fog, 1.8 = heavy fog
+  const [fogDensity, setFogDensity] = useState(1.0);
+  const [frameAgeMs, setFrameAgeMs] = useState(0);
+
+  // Store diagnostics
+  const {
+    telemetryFps,
+    backendLatencyMs,
+    networkLatencyMs,
+    telemetrySeq,
+    lastPacketTime,
+    dataSource,
+  } = useStore();
+
+  // Update frame age counter at 10 Hz
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (lastPacketTime > 0) {
+        setFrameAgeMs(Math.round(performance.now() - lastPacketTime));
+      }
+    }, 100);
+    return () => clearInterval(timer);
+  }, [lastPacketTime]);
 
   const activeObstacles = sensors.filter(
-    s => s.distance_cm !== null && s.distance_cm > 0 && s.distance_cm <= MAX_RANGE
+    (s) => s.distance_cm !== null && s.distance_cm > 0 && s.distance_cm <= MAX_RANGE
   );
+
+  const totalLatencyMs = Math.round((backendLatencyMs + networkLatencyMs) * 10) / 10;
 
   return (
     <div className="w-full h-full relative">
       <CanvasErrorBoundary>
         <Canvas
           camera={{ position: [0, 8, 10], fov: 48 }}
-          shadows
+          shadows={false} // Shadows disabled on live telemetry for max frame rate
           style={{ background: 'transparent' }}
-          gl={{ antialias: true, alpha: true }}
+          gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}
         >
           <Scene sensors={sensors} fogDensity={fogDensity} />
         </Canvas>
       </CanvasErrorBoundary>
+
+      {/* Live Telemetry Performance HUD Bar (Top-Left) */}
+      <div className="absolute top-3 left-3 flex flex-col gap-1.5 z-10 pointer-events-none">
+        <div className="flex items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-cyan-500/30 text-xs shadow-lg">
+          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+          <span className="text-slate-300">
+            <strong className="text-cyan-400 font-mono text-sm">{activeObstacles.length}</strong> 3D Vehicle Cuboids
+          </span>
+          <span className="text-slate-600">|</span>
+          <span className="font-mono text-emerald-400 font-semibold">{telemetryFps.toFixed(1)} Hz</span>
+          <span className="text-slate-600">|</span>
+          <span className="text-slate-400 font-mono">#{telemetrySeq}</span>
+        </div>
+
+        {/* Latency & Freshness Sub-Bar */}
+        <div className="flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-md border border-slate-800 text-[10px] text-slate-400 font-mono">
+          <span>Backend: <strong className="text-cyan-300">{backendLatencyMs.toFixed(1)}ms</strong></span>
+          <span className="text-slate-700">·</span>
+          <span>E2E: <strong className="text-emerald-300">{totalLatencyMs}ms</strong></span>
+          <span className="text-slate-700">·</span>
+          <span>Age: <strong className={frameAgeMs < 250 ? 'text-emerald-400' : 'text-amber-400'}>{frameAgeMs}ms</strong></span>
+          <span className="text-slate-700">·</span>
+          <span className="uppercase text-[9px] px-1 py-0.2 rounded bg-slate-800 text-cyan-300">
+            {dataSource === 'hardware' ? 'HARDWARE' : 'SIMULATION'}
+          </span>
+        </div>
+      </div>
 
       {/* Fog Simulation Slider / Toggle in Top Bar */}
       <div className="absolute top-3 right-3 flex items-center gap-2 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/60 text-xs text-slate-300 z-10">
@@ -470,16 +515,6 @@ export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
             <span className="text-slate-500">{label}</span>
           </div>
         ))}
-      </div>
-
-      {/* Active 3D Cuboids Count & HUD Status */}
-      <div className="absolute top-3 left-3 flex flex-col gap-1 z-10">
-        <div className="flex items-center gap-2 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/60 text-xs">
-          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-          <span className="text-slate-300">
-            <strong className="text-cyan-400 font-mono text-sm">{activeObstacles.length}</strong> 3D Vehicle Cuboids Visible
-          </span>
-        </div>
       </div>
     </div>
   );

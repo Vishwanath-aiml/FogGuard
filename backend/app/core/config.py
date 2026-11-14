@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = DEFAULT_DB_URI
     CORS_ORIGINS: str = '["http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000","http://127.0.0.1:3000"]'
     SIMULATION_MODE: bool = True
-    SIMULATION_INTERVAL_MS: int = 1000
+    SIMULATION_INTERVAL_MS: int = 100
     DATA_RETENTION_DAYS: int = 30
     MAX_RANGE_CM: float = 400.0
     CRITICAL_THRESHOLD_CM: float = 50.0

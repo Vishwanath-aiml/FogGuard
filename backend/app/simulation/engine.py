@@ -5,6 +5,7 @@ Runs as a background asyncio task.
 import asyncio
 import random
 import math
+import time
 from datetime import datetime, timezone
 from typing import Optional
 import logging
@@ -37,18 +38,18 @@ class SimulationScenario:
         self._traffic_elapsed = 0
         self._traffic_index = 0
 
-    def next_traffic_state(self):
+    def next_traffic_state(self, delta_sec: float = 0.1):
         dur = TRAFFIC_DURATIONS[TRAFFIC_CYCLE[self._traffic_index]]
-        self._traffic_elapsed += 1
+        self._traffic_elapsed += delta_sec
         if self._traffic_elapsed >= dur:
             self._traffic_elapsed = 0
             self._traffic_index = (self._traffic_index + 1) % len(TRAFFIC_CYCLE)
         return TRAFFIC_CYCLE[self._traffic_index], TRAFFIC_DURATIONS[TRAFFIC_CYCLE[self._traffic_index]]
 
-    def get_readings(self) -> dict:
+    def get_readings(self, delta_sec: float = 0.1) -> dict:
         self._tick += 1
         t = self._tick
-        state, dur = self.next_traffic_state()
+        state, dur = self.next_traffic_state(delta_sec)
         base = self._base_distances(t)
         return {
             "distances": base,
@@ -176,6 +177,8 @@ class SimulationEngine:
         self._speed_multiplier = 1.0
         self._task: Optional[asyncio.Task] = None
         self._data_callback = None
+        self._seq = 0
+        self._start_time = 0.0
 
     def set_data_callback(self, callback):
         self._data_callback = callback
@@ -188,8 +191,10 @@ class SimulationEngine:
         cls = SCENARIOS.get(scenario, NormalScenario)
         self._scenario = cls(scenario)
         self._running = True
+        self._seq = 0
+        self._start_time = time.time()
         self._task = asyncio.create_task(self._run())
-        logger.info(f"Simulation started: scenario={scenario}, speed={speed}x")
+        logger.info(f"Simulation started: scenario={scenario}, speed={speed}x, interval={settings.SIMULATION_INTERVAL_MS}ms")
 
     async def stop(self):
         self._running = False
@@ -204,6 +209,8 @@ class SimulationEngine:
     def reset(self):
         cls = SCENARIOS.get(self._scenario_name, NormalScenario)
         self._scenario = cls(self._scenario_name)
+        self._seq = 0
+        self._start_time = time.time()
         logger.info("Simulation reset")
 
     @property
@@ -218,15 +225,20 @@ class SimulationEngine:
         interval = settings.SIMULATION_INTERVAL_MS / 1000.0
         while self._running:
             try:
-                payload = self._generate_payload()
+                payload = self._generate_payload(interval)
                 if self._data_callback:
                     await self._data_callback(payload)
             except Exception as e:
                 logger.error(f"Simulation error: {e}")
             await asyncio.sleep(interval / self._speed_multiplier)
 
-    def _generate_payload(self) -> TelemetryPayload:
-        data = self._scenario.get_readings()
+    def _generate_payload(self, interval: float = 0.1) -> TelemetryPayload:
+        self._seq += 1
+        now_time = time.time()
+        uptime_ms = int((now_time - self._start_time) * 1000)
+        host_rx_ns = time.perf_counter_ns()
+
+        data = self._scenario.get_readings(delta_sec=interval * self._speed_multiplier)
         sensors = []
         for sid, zone in SENSOR_ZONES.items():
             dist = data["distances"].get(sid)
@@ -249,6 +261,9 @@ class SimulationEngine:
         return TelemetryPayload(
             device_id="fogguard-simulation",
             timestamp=datetime.now(timezone.utc),
+            seq=self._seq,
+            uptime_ms=uptime_ms,
+            host_rx_ns=host_rx_ns,
             sensors=sensors,
             traffic_signal=traffic,
         )

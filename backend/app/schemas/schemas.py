@@ -44,6 +44,9 @@ class TrafficSignalData(BaseModel):
 class TelemetryPayload(BaseModel):
     device_id: str
     timestamp: Optional[datetime] = None
+    seq: Optional[int] = None
+    uptime_ms: Optional[int] = None
+    host_rx_ns: Optional[int] = None
     sensors: List[SensorData]
     traffic_signal: Optional[TrafficSignalData] = None
 

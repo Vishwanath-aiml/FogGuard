@@ -1,9 +1,12 @@
 """IoT Telemetry endpoint — receives data from ESP32, direct USB serial, or simulation.
+Optimized for ultra-low latency, sub-millisecond broadcast, zero disk wait on hot path,
+and high-resolution latency instrumentation.
 """
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
 import copy
+import time
 import logging
 
 from app.database.db import get_db, AsyncSessionLocal
@@ -16,12 +19,14 @@ from app.simulation.engine import simulation_engine, SCENARIOS
 from app.hardware.source import hardware_source
 from app.core.websocket_manager import manager
 from app.core.config import settings
+from app.core.latency_tracker import latency_tracker
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Shared mutable state for last telemetry
 _last_telemetry: dict = {}
+_backend_seq: int = 0
 
 
 def get_last_telemetry() -> dict:
@@ -34,14 +39,22 @@ async def process_telemetry(
     payload: TelemetryPayload, db: AsyncSession, source: str = "hardware"
 ):
     """
-    Core telemetry processing pipeline:
-    1. Precompute distance classifications (once per sensor).
-    2. Evaluate obstacle warning conditions (once per sensor).
-    3. Persist new WarningEvents directly to SQLite to generate real database IDs.
-    4. Broadcast state immediately over WebSocket with genuine database IDs.
-    5. Persist raw sensor readings, obstacle events, traffic changes, and device status.
+    Live telemetry processing pipeline (Ultra-Low-Latency):
+    1. Precompute distance classifications once per sensor.
+    2. Evaluate obstacle warning conditions once per sensor.
+    3. Flush WarningEvents to SQLite to allocate genuine database IDs without blocking fsync.
+    4. Immediate WebSocket broadcast (sub-millisecond, before any disk commit).
+    5. Asynchronously persist warnings and enqueue telemetry to background write queue.
     """
-    global _last_telemetry
+    global _last_telemetry, _backend_seq
+
+    t_proc_start = time.perf_counter_ns()
+
+    if payload.seq is not None:
+        seq_num = payload.seq
+    else:
+        _backend_seq += 1
+        seq_num = _backend_seq
 
     now = payload.timestamp or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -77,11 +90,11 @@ async def process_telemetry(
         if w:
             raw_warnings.append(w)
 
-    # Persist warning events to SQLite immediately to get true autoincrement primary keys
+    # Allocate primary keys for new warnings in SQLite memory (flush without fsync)
     persisted_warnings = []
     if raw_warnings:
         persisted_warnings = await data_service.save_warning_events(db, raw_warnings)
-        await db.commit()  # Ensure warnings exist in DB so frontend can immediately acknowledge
+        await db.flush()
 
     warnings_out = [
         {
@@ -105,6 +118,12 @@ async def process_telemetry(
         }
 
     is_sim = (source == "simulation")
+    t_proc_end = time.perf_counter_ns()
+    backend_proc_ms = (t_proc_end - t_proc_start) / 1_000_000.0
+
+    # Record latency metrics in rolling tracker
+    latency_tracker.record(backend_proc_ms, seq=seq_num)
+
     broadcast_msg = {
         "type": "telemetry",
         "source": source,
@@ -113,14 +132,23 @@ async def process_telemetry(
         "traffic_signal": traffic_out,
         "new_warnings": warnings_out,
         "simulation_mode": is_sim,
+        "perf": {
+            "seq": seq_num,
+            "uptime_ms": payload.uptime_ms,
+            "backend_proc_ms": round(backend_proc_ms, 3),
+            "host_tx_ms": round(time.time() * 1000, 2),
+        },
     }
 
     _last_telemetry = broadcast_msg
 
-    # 4. Immediate WebSocket broadcast (sub-millisecond)
+    # 4. Immediate concurrent WebSocket broadcast (sub-millisecond)
     await manager.broadcast(broadcast_msg)
 
-    # 5. Persist high-frequency raw sensor data, traffic signal, and device status
+    # 5. Post-broadcast database persistence
+    if raw_warnings:
+        await db.commit()
+
     if write_queue.is_running:
         write_queue.enqueue({"payload": payload, "levels": levels})
     else:
@@ -148,6 +176,12 @@ async def receive_telemetry(
 
     await process_telemetry(payload, db, source="hardware")
     return {"status": "ok", "processed_sensors": len(payload.sensors)}
+
+
+@router.get("/iot/diagnostics/latency", summary="Get real-time latency and throughput diagnostics")
+async def get_latency_diagnostics():
+    """Returns high-resolution P50, P95, P99 latency percentiles, telemetry FPS, and drop metrics."""
+    return latency_tracker.get_stats()
 
 
 @router.post("/simulation/control", summary="Control simulation mode")

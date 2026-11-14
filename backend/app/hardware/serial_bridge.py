@@ -131,21 +131,24 @@ class SerialHardwareBridge:
 
         loop = asyncio.get_running_loop()
 
+        import time
+
         while self._running:
             try:
                 ser = await loop.run_in_executor(
                     None,
-                    lambda: serial.Serial(self._port, self._baudrate, timeout=1.0)
+                    lambda: serial.Serial(self._port, self._baudrate, timeout=0.02)
                 )
-                logger.info(f"Connected to Arduino on {self._port}")
+                logger.info(f"Connected to Arduino on {self._port} @ {self._baudrate} baud (low-latency non-blocking mode)")
 
                 try:
                     while self._running:
                         line = await loop.run_in_executor(None, ser.readline)
                         if not line:
-                            await asyncio.sleep(0.01)
+                            await asyncio.sleep(0.002)
                             continue
 
+                        host_rx_ns = time.perf_counter_ns()
                         text = line.decode("utf-8", errors="ignore").strip()
                         if not text:
                             continue
@@ -166,6 +169,9 @@ class SerialHardwareBridge:
                             payload = TelemetryPayload(
                                 device_id="fogguard-arduino",
                                 timestamp=datetime.now(timezone.utc),
+                                seq=payload_dict.get("seq"),
+                                uptime_ms=payload_dict.get("uptime_ms"),
+                                host_rx_ns=host_rx_ns,
                                 sensors=sensors,
                                 traffic_signal=traffic
                             )
@@ -216,7 +222,12 @@ class SerialHardwareBridge:
                         "state": data.get("traffic", "GREEN"),
                         "duration_seconds": data.get("dur", 30)
                     }
-                return {"sensors": sensors, "traffic_signal": traffic}
+                return {
+                    "sensors": sensors,
+                    "traffic_signal": traffic,
+                    "seq": data.get("seq"),
+                    "uptime_ms": data.get("up") or data.get("uptime_ms"),
+                }
             except Exception:
                 pass
 
