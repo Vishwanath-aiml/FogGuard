@@ -1,6 +1,6 @@
 // 3D Obstacle Visualization using React Three Fiber
 // Renders the vehicle, sensor beams, and ADAS 3D bounding cuboids for detected vehicles in fog
-import { useRef, useMemo, useState } from 'react';
+import { Component, useRef, useMemo, useState, type ReactNode, type ErrorInfo } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Text, Grid } from '@react-three/drei';
 import * as THREE from 'three';
@@ -12,8 +12,8 @@ import { warningLevelColor } from '../../utils';
 const ZONE_POSITIONS: Record<string, [number, number, number]> = {
   front_left: [-1.0, 0, -2.5],
   front_center: [0, 0, -2.5],
-  front_center_left: [-0.3, 0, -2.5],
-  front_center_right: [0.3, 0, -2.5],
+  front_center_left: [-0.35, 0, -2.5],
+  front_center_right: [0.35, 0, -2.5],
   front_right: [1.0, 0, -2.5],
   left_side: [-2.2, 0, 0],
   right_side: [2.2, 0, 0],
@@ -33,6 +33,56 @@ const ZONE_DIRECTIONS: Record<string, [number, number, number]> = {
 
 const MAX_RANGE = 400;
 const SCALE = 0.025; // cm to Three.js units (400cm = 10 units in 3D world)
+
+// ─── React Error Boundary for 3D WebGL Canvas ───────────────────────────────
+interface ErrorBoundaryProps {
+  children: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class CanvasErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('Canvas 3D Error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-slate-950/90 text-slate-300">
+          <div className="w-12 h-12 rounded-full bg-red-500/20 text-red-400 flex items-center justify-center mb-3">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <h3 className="font-semibold text-white mb-1">3D HUD Temporarily Unavailable</h3>
+          <p className="text-xs text-slate-400 max-w-sm mb-4">
+            {this.state.error?.message || 'WebGL context or rendering error encountered.'}
+          </p>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-xs font-medium transition-colors"
+          >
+            Reload 3D HUD
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function Vehicle() {
   return (
@@ -71,7 +121,7 @@ function Vehicle() {
         <boxGeometry args={[1.8, 0.08, 0.05]} />
         <meshStandardMaterial color="#06b6d4" emissive="#06b6d4" emissiveIntensity={0.6} />
       </mesh>
-      {/* Roof Ultrasonic Sensor Mount (S4) */}
+      {/* Roof Ultrasonic Sensor Mount */}
       <mesh position={[0, 1.15, -0.9]}>
         <boxGeometry args={[0.25, 0.12, 0.25]} />
         <meshStandardMaterial color="#06b6d4" emissive="#06b6d4" emissiveIntensity={0.8} />
@@ -91,13 +141,13 @@ function SensorBeam({ zone, sensor }: { zone: string; sensor: SensorReading }) {
   const color = warningLevelColor(sensor.warning_level);
 
   const midPoint: [number, number, number] = [
-    startPos[0] + dir[0] * beamLength / 2,
+    startPos[0] + (dir[0] * beamLength) / 2,
     startPos[1],
-    startPos[2] + dir[2] * beamLength / 2,
+    startPos[2] + (dir[2] * beamLength) / 2,
   ];
 
   useFrame(({ clock }) => {
-    if (meshRef.current) {
+    if (meshRef.current && meshRef.current.material) {
       const alpha = sensor.obstacle_detected
         ? 0.35 + 0.25 * Math.sin(clock.getElapsedTime() * 4)
         : 0.08;
@@ -124,14 +174,16 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
   const groupRef = useRef<THREE.Group>(null);
   const meshRef = useRef<THREE.Mesh>(null);
 
-  // Render cuboid whenever a valid positive distance is reported within range
-  if (sensor.distance_cm === null || sensor.distance_cm <= 0 || sensor.distance_cm > MAX_RANGE) {
-    return null;
-  }
+  // Hook 1: Check obstacle condition (UNCONDITIONAL)
+  const hasObstacle =
+    sensor.distance_cm !== null &&
+    sensor.distance_cm > 0 &&
+    sensor.distance_cm <= MAX_RANGE;
 
-  const startPos = ZONE_POSITIONS[zone] as [number, number, number];
-  const dir = ZONE_DIRECTIONS[zone] as [number, number, number];
-  const dist = Math.min(sensor.distance_cm, MAX_RANGE) * SCALE;
+  const startPos = ZONE_POSITIONS[zone] ?? [0, 0, -2.5];
+  const dir = ZONE_DIRECTIONS[zone] ?? [0, 0, -1];
+  const safeDistance = Math.min(sensor.distance_cm ?? MAX_RANGE, MAX_RANGE);
+  const dist = safeDistance * SCALE;
 
   // Obstacle Dimensions (Vehicle size)
   const isRoofSensor = zone === 'roof_center';
@@ -151,8 +203,19 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
   const isCritical = sensor.warning_level === 'CRITICAL';
   const isWarning = sensor.warning_level === 'WARNING';
 
+  // Hook 2: Memoize geometries to eliminate memory churn / buffer re-creations
+  const edgesGeom = useMemo(() => {
+    const box = new THREE.BoxGeometry(...size);
+    const edges = new THREE.EdgesGeometry(box);
+    box.dispose();
+    return edges;
+  }, [isRoofSensor]);
+
+  // Hook 3: Frame loop (UNCONDITIONAL - never violated by early returns)
   useFrame(({ clock }) => {
-    if (meshRef.current) {
+    if (!hasObstacle) return;
+
+    if (meshRef.current && meshRef.current.material) {
       const t = clock.getElapsedTime();
       const pulseSpeed = isCritical ? 8 : isWarning ? 5 : 2;
       const pulse = 0.5 + 0.5 * Math.sin(t * pulseSpeed);
@@ -166,6 +229,11 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
       }
     }
   });
+
+  // Early return is now STRICTLY AFTER all React hooks are executed
+  if (!hasObstacle) {
+    return null;
+  }
 
   return (
     <group ref={groupRef} position={obstaclePos}>
@@ -184,8 +252,7 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
       </mesh>
 
       {/* 2. High-Visibility Glowing Wireframe Cage */}
-      <lineSegments>
-        <edgesGeometry args={[new THREE.BoxGeometry(...size)]} />
+      <lineSegments geometry={edgesGeom}>
         <lineBasicMaterial color={color} linewidth={2} />
       </lineSegments>
 
@@ -230,7 +297,7 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
           anchorX="center"
           anchorY="middle"
         >
-          {`${sensor.sensor_id}: ${Math.round(sensor.distance_cm)} cm`}
+          {`${sensor.sensor_id}: ${Math.round(sensor.distance_cm ?? 0)} cm`}
         </Text>
       </group>
     </group>
@@ -238,7 +305,7 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
 }
 
 function SensorIndicator({ zone, sensor }: { zone: string; sensor: SensorReading }) {
-  const pos = ZONE_POSITIONS[zone] as [number, number, number];
+  const pos = ZONE_POSITIONS[zone] ?? [0, 0, 0];
   const color = warningLevelColor(sensor.warning_level);
   const indicatorRef = useRef<THREE.Mesh>(null);
 
@@ -283,15 +350,22 @@ function Scene({ sensors, fogDensity }: { sensors: SensorReading[]; fogDensity: 
 
   return (
     <>
-      {/* Atmospheric Fog Effect — cuboids pierce through the fog */}
+      {/* Atmospheric Fog Effect — keeps vehicle and obstacles sharp while fading distant background */}
       {fogDensity > 0 && (
-        <fog attach="fog" args={['#020818', 6 / Math.max(0.1, fogDensity), 26 / Math.max(0.1, fogDensity)]} />
+        <fog
+          attach="fog"
+          args={[
+            '#020818',
+            12, // Near: starts behind ego vehicle (vehicle is at dist ~12.8)
+            Math.max(30, 60 / Math.max(0.2, fogDensity)), // Far: normal ~60, heavy ~33
+          ]}
+        />
       )}
 
       {/* Lighting */}
-      <ambientLight intensity={0.4} />
-      <directionalLight position={[5, 12, 5]} intensity={0.9} castShadow />
-      <pointLight position={[0, 6, 0]} intensity={0.6} color="#38bdf8" />
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[5, 12, 5]} intensity={1.0} castShadow />
+      <pointLight position={[0, 6, 0]} intensity={0.8} color="#38bdf8" />
 
       {/* Road Grid Floor */}
       <Grid
@@ -302,7 +376,7 @@ function Scene({ sensors, fogDensity }: { sensors: SensorReading[]; fogDensity: 
         sectionSize={5}
         sectionThickness={1.2}
         sectionColor="#1d4ed8"
-        fadeDistance={28}
+        fadeDistance={30}
         position={[0, -0.05, -5]}
       />
 
@@ -340,7 +414,7 @@ interface ObstacleVisualizationProps {
 }
 
 export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
-  const [fogDensity, setFogDensity] = useState(1.0); // 0 = clear, 1 = normal fog, 2 = heavy fog
+  const [fogDensity, setFogDensity] = useState(1.0); // 0 = clear, 1 = normal fog, 1.8 = heavy fog
 
   const activeObstacles = sensors.filter(
     s => s.distance_cm !== null && s.distance_cm > 0 && s.distance_cm <= MAX_RANGE
@@ -348,17 +422,19 @@ export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
 
   return (
     <div className="w-full h-full relative">
-      <Canvas
-        camera={{ position: [0, 8, 10], fov: 48 }}
-        shadows
-        style={{ background: 'transparent' }}
-        gl={{ antialias: true, alpha: true }}
-      >
-        <Scene sensors={sensors} fogDensity={fogDensity} />
-      </Canvas>
+      <CanvasErrorBoundary>
+        <Canvas
+          camera={{ position: [0, 8, 10], fov: 48 }}
+          shadows
+          style={{ background: 'transparent' }}
+          gl={{ antialias: true, alpha: true }}
+        >
+          <Scene sensors={sensors} fogDensity={fogDensity} />
+        </Canvas>
+      </CanvasErrorBoundary>
 
       {/* Fog Simulation Slider / Toggle in Top Bar */}
-      <div className="absolute top-3 right-3 flex items-center gap-2 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/60 text-xs text-slate-300">
+      <div className="absolute top-3 right-3 flex items-center gap-2 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/60 text-xs text-slate-300 z-10">
         <span>Fog Density:</span>
         <button
           onClick={() => setFogDensity(0)}
@@ -381,7 +457,7 @@ export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
       </div>
 
       {/* Legend overlay */}
-      <div className="absolute bottom-3 right-3 flex flex-col gap-1 text-xs bg-slate-900/80 backdrop-blur-md p-2.5 rounded-lg border border-slate-800">
+      <div className="absolute bottom-3 right-3 flex flex-col gap-1 text-xs bg-slate-900/80 backdrop-blur-md p-2.5 rounded-lg border border-slate-800 z-10">
         {[
           { level: 'CRITICAL', color: '#ef4444', label: '< 50cm' },
           { level: 'WARNING', color: '#f97316', label: '50–100cm' },
@@ -397,7 +473,7 @@ export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
       </div>
 
       {/* Active 3D Cuboids Count & HUD Status */}
-      <div className="absolute top-3 left-3 flex flex-col gap-1">
+      <div className="absolute top-3 left-3 flex flex-col gap-1 z-10">
         <div className="flex items-center gap-2 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/60 text-xs">
           <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
           <span className="text-slate-300">

@@ -25,6 +25,7 @@ router = APIRouter()
 
 # Shared mutable state for last telemetry
 _last_telemetry: dict = {}
+_warning_id_seq: int = 1000
 
 
 async def process_telemetry(
@@ -69,8 +70,9 @@ async def process_telemetry(
             thresholds=thresholds, now=now,
         )
         if w:
+            _warning_id_seq += 1
             warnings_out.append({
-                "id": None,       # ID assigned after DB flush
+                "id": _warning_id_seq,  # Deterministic unique ID for WebSocket/React keys
                 "sensor_id": w["sensor_id"],
                 "zone": w["zone"],
                 "distance_cm": w["distance_cm"],
