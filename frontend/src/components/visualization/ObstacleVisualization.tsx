@@ -1,5 +1,6 @@
 // 3D Obstacle Visualization using React Three Fiber
-import { useRef, useMemo } from 'react';
+// Renders the vehicle, sensor beams, and ADAS 3D bounding cuboids for detected vehicles in fog
+import { useRef, useMemo, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Text, Grid } from '@react-three/drei';
 import * as THREE from 'three';
@@ -7,16 +8,16 @@ import type { SensorReading } from '../../types';
 import { warningLevelColor } from '../../utils';
 
 // Sensor zone 3D positions (relative to vehicle center)
-// Vehicle is ~4 units long, 2 units wide
+// Vehicle is ~4 units long, 2 units wide (front bumper at z = -2.0)
 const ZONE_POSITIONS: Record<string, [number, number, number]> = {
-  front_left: [-1.0, 0, -3.5],
-  front_center: [0, 0, -3.5],
-  front_center_left: [-0.3, 0, -3.5],
-  front_center_right: [0.3, 0, -3.5],
-  front_right: [1.0, 0, -3.5],
-  left_side: [-2.5, 0, 0],
-  right_side: [2.5, 0, 0],
-  roof_center: [0, 1.2, -0.3],
+  front_left: [-1.0, 0, -2.5],
+  front_center: [0, 0, -2.5],
+  front_center_left: [-0.3, 0, -2.5],
+  front_center_right: [0.3, 0, -2.5],
+  front_right: [1.0, 0, -2.5],
+  left_side: [-2.2, 0, 0],
+  right_side: [2.2, 0, 0],
+  roof_center: [0, 1.2, -1.0],
 };
 
 const ZONE_DIRECTIONS: Record<string, [number, number, number]> = {
@@ -27,43 +28,53 @@ const ZONE_DIRECTIONS: Record<string, [number, number, number]> = {
   front_right: [0.25, 0, -1],
   left_side: [-1, 0, 0],
   right_side: [1, 0, 0],
-  roof_center: [0, 0.1, -1],
+  roof_center: [0, 0.05, -1],
 };
 
 const MAX_RANGE = 400;
-const SCALE = 0.015; // cm to Three.js units
+const SCALE = 0.025; // cm to Three.js units (400cm = 10 units in 3D world)
 
 function Vehicle() {
   return (
     <group>
       {/* Car body */}
-      <mesh position={[0, 0.3, 0]} castShadow>
-        <boxGeometry args={[1.8, 0.5, 4]} />
-        <meshStandardMaterial color="#1e40af" metalness={0.6} roughness={0.4} />
+      <mesh position={[0, 0.35, 0]} castShadow>
+        <boxGeometry args={[1.8, 0.5, 3.8]} />
+        <meshStandardMaterial color="#1e40af" metalness={0.7} roughness={0.3} />
       </mesh>
-      {/* Roof */}
-      <mesh position={[0, 0.8, -0.3]} castShadow>
-        <boxGeometry args={[1.5, 0.4, 2.2]} />
-        <meshStandardMaterial color="#1d4ed8" metalness={0.5} roughness={0.5} />
+      {/* Cabin / Roof */}
+      <mesh position={[0, 0.85, -0.2]} castShadow>
+        <boxGeometry args={[1.4, 0.5, 2.0]} />
+        <meshStandardMaterial color="#1d4ed8" metalness={0.6} roughness={0.4} />
+      </mesh>
+      {/* Windshield glass */}
+      <mesh position={[0, 0.85, -1.21]} rotation={[-Math.PI / 6, 0, 0]}>
+        <planeGeometry args={[1.3, 0.55]} />
+        <meshStandardMaterial color="#38bdf8" transparent opacity={0.6} roughness={0.1} />
       </mesh>
       {/* Wheels */}
-      {[[-0.95, -0.05, -1.4], [0.95, -0.05, -1.4], [-0.95, -0.05, 1.4], [0.95, -0.05, 1.4]].map(([x, y, z], i) => (
+      {[[-0.95, 0.15, -1.2], [0.95, 0.15, -1.2], [-0.95, 0.15, 1.2], [0.95, 0.15, 1.2]].map(([x, y, z], i) => (
         <mesh key={i} position={[x, y, z] as [number, number, number]} rotation={[0, 0, Math.PI / 2]}>
-          <cylinderGeometry args={[0.35, 0.35, 0.25, 16]} />
-          <meshStandardMaterial color="#0f172a" metalness={0.3} roughness={0.8} />
+          <cylinderGeometry args={[0.32, 0.32, 0.25, 20]} />
+          <meshStandardMaterial color="#0f172a" metalness={0.4} roughness={0.8} />
         </mesh>
       ))}
-      {/* Headlights */}
-      {[[-0.6, 0.3, -2.01], [0.6, 0.3, -2.01]].map(([x, y, z], i) => (
+      {/* Headlights (glow in fog) */}
+      {[[-0.65, 0.35, -1.91], [0.65, 0.35, -1.91]].map(([x, y, z], i) => (
         <mesh key={i} position={[x, y, z] as [number, number, number]}>
-          <boxGeometry args={[0.3, 0.15, 0.05]} />
-          <meshStandardMaterial color="#fef08a" emissive="#fef08a" emissiveIntensity={0.5} />
+          <boxGeometry args={[0.3, 0.12, 0.05]} />
+          <meshStandardMaterial color="#fef08a" emissive="#fef08a" emissiveIntensity={1.2} />
         </mesh>
       ))}
-      {/* Front indicator bar */}
-      <mesh position={[0, 0.1, -2.01]}>
-        <boxGeometry args={[1.8, 0.05, 0.05]} />
-        <meshStandardMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={0.3} />
+      {/* Front LIDAR / Ultrasonic Sensor Mount Bar */}
+      <mesh position={[0, 0.18, -1.92]}>
+        <boxGeometry args={[1.8, 0.08, 0.05]} />
+        <meshStandardMaterial color="#06b6d4" emissive="#06b6d4" emissiveIntensity={0.6} />
+      </mesh>
+      {/* Roof Ultrasonic Sensor Mount (S4) */}
+      <mesh position={[0, 1.15, -0.9]}>
+        <boxGeometry args={[0.25, 0.12, 0.25]} />
+        <meshStandardMaterial color="#06b6d4" emissive="#06b6d4" emissiveIntensity={0.8} />
       </mesh>
     </group>
   );
@@ -88,84 +99,140 @@ function SensorBeam({ zone, sensor }: { zone: string; sensor: SensorReading }) {
   useFrame(({ clock }) => {
     if (meshRef.current) {
       const alpha = sensor.obstacle_detected
-        ? 0.4 + 0.3 * Math.sin(clock.getElapsedTime() * 3)
-        : 0.1;
+        ? 0.35 + 0.25 * Math.sin(clock.getElapsedTime() * 4)
+        : 0.08;
       (meshRef.current.material as THREE.MeshStandardMaterial).opacity = alpha;
     }
   });
 
-  const isVerticalBeam = Math.abs(dir[2]) < 0.1;
-  const rotation: [number, number, number] = isVerticalBeam ? [0, 0, Math.PI / 2] : [Math.PI / 2, 0, 0];
-  const scale: [number, number, number] = isVerticalBeam
+  const isSideBeam = Math.abs(dir[2]) < 0.1;
+  const rotation: [number, number, number] = isSideBeam ? [0, 0, Math.PI / 2] : [Math.PI / 2, 0, 0];
+  const scale: [number, number, number] = isSideBeam
     ? [beamLength, 0.04, 0.04]
     : [0.04, beamLength, 0.04];
 
   return (
     <mesh ref={meshRef} position={midPoint} rotation={rotation} scale={scale}>
-      <cylinderGeometry args={[0.5, 0.5, 1, 6]} />
-      <meshStandardMaterial color={color} transparent opacity={0.2} />
+      <cylinderGeometry args={[0.3, 0.3, 1, 6]} />
+      <meshStandardMaterial color={color} transparent opacity={0.15} />
     </mesh>
   );
 }
 
+// ─── 3D Vehicle Bounding Cuboid Revealed in Fog ──────────────────────────────
 function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading }) {
+  const groupRef = useRef<THREE.Group>(null);
   const meshRef = useRef<THREE.Mesh>(null);
 
-  if (!sensor.obstacle_detected || sensor.distance_cm === null) return null;
+  // Render cuboid whenever a valid positive distance is reported within range
+  if (sensor.distance_cm === null || sensor.distance_cm <= 0 || sensor.distance_cm > MAX_RANGE) {
+    return null;
+  }
 
   const startPos = ZONE_POSITIONS[zone] as [number, number, number];
   const dir = ZONE_DIRECTIONS[zone] as [number, number, number];
   const dist = Math.min(sensor.distance_cm, MAX_RANGE) * SCALE;
 
+  // Obstacle Dimensions (Vehicle size)
+  const isRoofSensor = zone === 'roof_center';
+  const size: [number, number, number] = isRoofSensor
+    ? [1.8, 1.2, 2.4]  // Overhead / tall truck / bridge obstacle
+    : [1.6, 1.1, 2.4]; // Standard vehicle cuboid ahead
+
+  const centerY = isRoofSensor ? 1.4 : size[1] / 2;
+
   const obstaclePos: [number, number, number] = [
     startPos[0] + dir[0] * dist,
-    0.25,
+    centerY,
     startPos[2] + dir[2] * dist,
   ];
 
   const color = warningLevelColor(sensor.warning_level);
+  const isCritical = sensor.warning_level === 'CRITICAL';
+  const isWarning = sensor.warning_level === 'WARNING';
 
   useFrame(({ clock }) => {
     if (meshRef.current) {
       const t = clock.getElapsedTime();
-      meshRef.current.position.y = 0.25 + 0.03 * Math.sin(t * 2);
+      const pulseSpeed = isCritical ? 8 : isWarning ? 5 : 2;
+      const pulse = 0.5 + 0.5 * Math.sin(t * pulseSpeed);
+
       (meshRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity =
-        0.3 + 0.2 * Math.sin(t * 3);
+        isCritical ? 0.6 + 0.4 * pulse : 0.3 + 0.2 * pulse;
+
+      // Subtle hover/suspension motion
+      if (groupRef.current) {
+        groupRef.current.position.y = obstaclePos[1] + 0.02 * Math.sin(t * 3);
+      }
     }
   });
 
-  const size: [number, number, number] = [0.5, 0.5, 0.5];
-
   return (
-    <group position={obstaclePos}>
+    <group ref={groupRef} position={obstaclePos}>
+      {/* 1. Translucent Volumetric Vehicle Body */}
       <mesh ref={meshRef}>
         <boxGeometry args={size} />
         <meshStandardMaterial
           color={color}
           emissive={color}
-          emissiveIntensity={0.3}
+          emissiveIntensity={isCritical ? 0.8 : 0.4}
           transparent
-          opacity={0.75}
-          metalness={0.1}
-          roughness={0.6}
+          opacity={isCritical ? 0.55 : 0.35}
+          metalness={0.2}
+          roughness={0.4}
         />
       </mesh>
-      {/* Wireframe outline */}
+
+      {/* 2. High-Visibility Glowing Wireframe Cage */}
       <lineSegments>
         <edgesGeometry args={[new THREE.BoxGeometry(...size)]} />
-        <lineBasicMaterial color={color} />
+        <lineBasicMaterial color={color} linewidth={2} />
       </lineSegments>
-      {/* Distance label */}
-      <Text
-        position={[0, 0.5, 0]}
-        fontSize={0.18}
-        color={color}
-        anchorX="center"
-        anchorY="middle"
-        font={undefined}
-      >
-        {`${Math.round(sensor.distance_cm)}cm`}
-      </Text>
+
+      {/* 3. Corner Brackets (Targeting Reticles) */}
+      <group>
+        {/* Front-top corners */}
+        <mesh position={[size[0] / 2, size[1] / 2, -size[2] / 2]}>
+          <boxGeometry args={[0.15, 0.15, 0.15]} />
+          <meshBasicMaterial color="#ffffff" />
+        </mesh>
+        <mesh position={[-size[0] / 2, size[1] / 2, -size[2] / 2]}>
+          <boxGeometry args={[0.15, 0.15, 0.15]} />
+          <meshBasicMaterial color="#ffffff" />
+        </mesh>
+        {/* Front-bottom corners */}
+        <mesh position={[size[0] / 2, -size[1] / 2, -size[2] / 2]}>
+          <boxGeometry args={[0.15, 0.15, 0.15]} />
+          <meshBasicMaterial color="#ffffff" />
+        </mesh>
+        <mesh position={[-size[0] / 2, -size[1] / 2, -size[2] / 2]}>
+          <boxGeometry args={[0.15, 0.15, 0.15]} />
+          <meshBasicMaterial color="#ffffff" />
+        </mesh>
+      </group>
+
+      {/* 4. Ground Projection Radar Ring */}
+      <mesh position={[0, -size[1] / 2 + 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.9, 1.05, 32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.6} side={THREE.DoubleSide} />
+      </mesh>
+
+      {/* 5. 3D Floating HUD Distance Badge */}
+      <group position={[0, size[1] / 2 + 0.45, 0]}>
+        <mesh>
+          <planeGeometry args={[1.4, 0.35]} />
+          <meshBasicMaterial color="#020818" transparent opacity={0.85} side={THREE.DoubleSide} />
+        </mesh>
+        <Text
+          position={[0, 0, 0.02]}
+          fontSize={0.16}
+          color={color}
+          anchorX="center"
+          anchorY="middle"
+        >
+          {`${sensor.sensor_id}: ${Math.round(sensor.distance_cm)} cm`}
+        </Text>
+      </group>
     </group>
   );
 }
@@ -183,22 +250,21 @@ function SensorIndicator({ zone, sensor }: { zone: string; sensor: SensorReading
   });
 
   return (
-    <group position={[pos[0], 0, pos[2]]}>
+    <group position={[pos[0], 0.05, pos[2]]}>
       <mesh ref={indicatorRef} position={[0, 0.08, 0]}>
-        <sphereGeometry args={[0.08, 8, 8]} />
+        <sphereGeometry args={[0.08, 12, 12]} />
         <meshStandardMaterial
           color={color}
           emissive={color}
-          emissiveIntensity={sensor.obstacle_detected ? 0.8 : 0.2}
+          emissiveIntensity={sensor.obstacle_detected ? 0.9 : 0.2}
         />
       </mesh>
       <Text
-        position={[0, -0.2, 0]}
-        fontSize={0.12}
+        position={[0, -0.18, 0]}
+        fontSize={0.13}
         color="#94a3b8"
         anchorX="center"
         anchorY="middle"
-        font={undefined}
       >
         {sensor.sensor_id}
       </Text>
@@ -206,7 +272,7 @@ function SensorIndicator({ zone, sensor }: { zone: string; sensor: SensorReading
   );
 }
 
-function Scene({ sensors }: { sensors: SensorReading[] }) {
+function Scene({ sensors, fogDensity }: { sensors: SensorReading[]; fogDensity: number }) {
   const sensorMap = useMemo(() => {
     const m: Record<string, SensorReading> = {};
     for (const s of sensors) {
@@ -217,28 +283,33 @@ function Scene({ sensors }: { sensors: SensorReading[] }) {
 
   return (
     <>
-      {/* Lighting */}
-      <ambientLight intensity={0.3} />
-      <directionalLight position={[5, 10, 5]} intensity={0.8} castShadow />
-      <pointLight position={[0, 5, 0]} intensity={0.5} color="#22d3ee" />
+      {/* Atmospheric Fog Effect — cuboids pierce through the fog */}
+      {fogDensity > 0 && (
+        <fog attach="fog" args={['#020818', 6 / Math.max(0.1, fogDensity), 26 / Math.max(0.1, fogDensity)]} />
+      )}
 
-      {/* Grid floor */}
+      {/* Lighting */}
+      <ambientLight intensity={0.4} />
+      <directionalLight position={[5, 12, 5]} intensity={0.9} castShadow />
+      <pointLight position={[0, 6, 0]} intensity={0.6} color="#38bdf8" />
+
+      {/* Road Grid Floor */}
       <Grid
-        args={[20, 20]}
+        args={[30, 30]}
         cellSize={1}
         cellThickness={0.5}
         cellColor="#0d2070"
         sectionSize={5}
-        sectionThickness={1}
+        sectionThickness={1.2}
         sectionColor="#1d4ed8"
-        fadeDistance={25}
-        position={[0, -0.05, 0]}
+        fadeDistance={28}
+        position={[0, -0.05, -5]}
       />
 
-      {/* Vehicle */}
+      {/* Ego Vehicle */}
       <Vehicle />
 
-      {/* Sensor beams, obstacles, and indicators */}
+      {/* Sensor Beams, 3D Obstacle Cuboids, and Sensor Status Dots */}
       {Object.entries(ZONE_POSITIONS).map(([zone]) => {
         const sensor = sensorMap[zone];
         if (!sensor) return null;
@@ -251,14 +322,14 @@ function Scene({ sensors }: { sensors: SensorReading[] }) {
         );
       })}
 
-      {/* Controls */}
+      {/* Orbit Controls */}
       <OrbitControls
         enablePan={true}
         enableZoom={true}
         minDistance={3}
-        maxDistance={25}
-        maxPolarAngle={Math.PI / 2.2}
-        target={[0, 0, 0]}
+        maxDistance={30}
+        maxPolarAngle={Math.PI / 2.15}
+        target={[0, 0.5, -4]}
       />
     </>
   );
@@ -269,19 +340,48 @@ interface ObstacleVisualizationProps {
 }
 
 export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
+  const [fogDensity, setFogDensity] = useState(1.0); // 0 = clear, 1 = normal fog, 2 = heavy fog
+
+  const activeObstacles = sensors.filter(
+    s => s.distance_cm !== null && s.distance_cm > 0 && s.distance_cm <= MAX_RANGE
+  );
+
   return (
     <div className="w-full h-full relative">
       <Canvas
-        camera={{ position: [0, 10, 12], fov: 50 }}
+        camera={{ position: [0, 8, 10], fov: 48 }}
         shadows
         style={{ background: 'transparent' }}
         gl={{ antialias: true, alpha: true }}
       >
-        <Scene sensors={sensors} />
+        <Scene sensors={sensors} fogDensity={fogDensity} />
       </Canvas>
 
+      {/* Fog Simulation Slider / Toggle in Top Bar */}
+      <div className="absolute top-3 right-3 flex items-center gap-2 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/60 text-xs text-slate-300">
+        <span>Fog Density:</span>
+        <button
+          onClick={() => setFogDensity(0)}
+          className={`px-2 py-0.5 rounded ${fogDensity === 0 ? 'bg-cyan-500 text-black font-semibold' : 'text-slate-400 hover:text-white'}`}
+        >
+          Clear
+        </button>
+        <button
+          onClick={() => setFogDensity(1.0)}
+          className={`px-2 py-0.5 rounded ${fogDensity === 1.0 ? 'bg-cyan-500 text-black font-semibold' : 'text-slate-400 hover:text-white'}`}
+        >
+          Normal
+        </button>
+        <button
+          onClick={() => setFogDensity(1.8)}
+          className={`px-2 py-0.5 rounded ${fogDensity === 1.8 ? 'bg-cyan-500 text-black font-semibold' : 'text-slate-400 hover:text-white'}`}
+        >
+          Heavy
+        </button>
+      </div>
+
       {/* Legend overlay */}
-      <div className="absolute bottom-3 right-3 flex flex-col gap-1 text-xs">
+      <div className="absolute bottom-3 right-3 flex flex-col gap-1 text-xs bg-slate-900/80 backdrop-blur-md p-2.5 rounded-lg border border-slate-800">
         {[
           { level: 'CRITICAL', color: '#ef4444', label: '< 50cm' },
           { level: 'WARNING', color: '#f97316', label: '50–100cm' },
@@ -289,17 +389,21 @@ export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
           { level: 'SAFE', color: '#22c55e', label: '> 150cm' },
         ].map(({ level, color, label }) => (
           <div key={level} className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-sm" style={{ backgroundColor: color }} />
-            <span className="text-slate-400">{level}</span>
-            <span className="text-slate-600">{label}</span>
+            <span className="w-3 h-3 rounded-sm shadow-sm" style={{ backgroundColor: color }} />
+            <span className="text-slate-300 font-medium">{level}</span>
+            <span className="text-slate-500">{label}</span>
           </div>
         ))}
       </div>
 
-      {/* Sensor count */}
-      <div className="absolute top-3 left-3 text-xs text-slate-400">
-        <span className="font-mono text-cyan-400">{sensors.filter(s => s.obstacle_detected).length}</span>
-        <span> / {sensors.length} sensors active</span>
+      {/* Active 3D Cuboids Count & HUD Status */}
+      <div className="absolute top-3 left-3 flex flex-col gap-1">
+        <div className="flex items-center gap-2 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/60 text-xs">
+          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+          <span className="text-slate-300">
+            <strong className="text-cyan-400 font-mono text-sm">{activeObstacles.length}</strong> 3D Vehicle Cuboids Visible
+          </span>
+        </div>
       </div>
     </div>
   );

@@ -66,13 +66,16 @@ async def get_device_statuses(db: AsyncSession = Depends(get_db)):
 @router.get("/devices/system-info", summary="Get system-level info")
 async def get_system_info():
     from app.services.write_queue import write_queue
+    from app.hardware.serial_bridge import serial_bridge
     return {
         "mode": "SIMULATION" if (simulation_engine.is_running or settings.SIMULATION_MODE) else "HARDWARE",
         "simulation_running": simulation_engine.is_running,
         "simulation_scenario": simulation_engine.scenario_name,
-        "hardware_connected": hardware_source.is_connected,
+        "hardware_connected": hardware_source.is_connected or serial_bridge.is_running,
         "hardware_last_seen": hardware_source.last_received.isoformat() if hardware_source.last_received else None,
-        "websocket_clients": 0,  # Updated from manager if needed
+        "serial_bridge_active": serial_bridge.is_running,
+        "serial_bridge_port": serial_bridge.current_port,
+        "websocket_clients": 0,
         "write_queue_pending": write_queue.pending,
         "thresholds": {
             "critical_cm": settings.CRITICAL_THRESHOLD_CM,
@@ -81,3 +84,32 @@ async def get_system_info():
             "max_range_cm": settings.MAX_RANGE_CM,
         }
     }
+
+
+@router.get("/devices/serial/ports", summary="List available USB Serial / COM ports")
+async def get_serial_ports():
+    """List available COM / tty ports on the host machine for direct Arduino USB connection."""
+    from app.hardware.serial_bridge import serial_bridge
+    return {
+        "ports": serial_bridge.list_ports(),
+        "active_port": serial_bridge.current_port,
+        "running": serial_bridge.is_running,
+    }
+
+
+@router.post("/devices/serial/connect", summary="Connect direct USB Serial bridge to Arduino")
+async def connect_serial(port: str = None, baudrate: int = 115200):
+    """Start reading from an Arduino plugged directly into USB."""
+    from app.hardware.serial_bridge import serial_bridge
+    try:
+        await serial_bridge.start(port=port, baudrate=baudrate)
+        return {"status": "connected", "port": serial_bridge.current_port, "baudrate": baudrate}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/devices/serial/disconnect", summary="Disconnect USB Serial bridge")
+async def disconnect_serial():
+    from app.hardware.serial_bridge import serial_bridge
+    await serial_bridge.stop()
+    return {"status": "disconnected"}
