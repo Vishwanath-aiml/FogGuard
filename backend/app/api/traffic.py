@@ -8,15 +8,16 @@ from datetime import datetime
 from app.database.db import get_db
 from app.models.sensor import TrafficSignalEvent
 from app.schemas.schemas import TrafficSignalEventOut
-from app.api.iot import _last_telemetry
+from app.api.iot import get_last_telemetry
 
 router = APIRouter()
 
 
 @router.get("/traffic/status", summary="Get current traffic signal status")
 async def get_traffic_status():
-    if _last_telemetry and _last_telemetry.get("traffic_signal"):
-        return _last_telemetry["traffic_signal"]
+    latest = get_last_telemetry()
+    if latest and latest.get("traffic_signal"):
+        return latest["traffic_signal"]
     return {"state": "UNKNOWN", "duration_seconds": None}
 
 

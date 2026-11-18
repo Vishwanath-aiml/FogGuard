@@ -1,6 +1,7 @@
+import math
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -24,6 +25,16 @@ class SensorData(BaseModel):
     distance_cm: Optional[float] = None
     obstacle_detected: bool = False
 
+    @field_validator("distance_cm")
+    @classmethod
+    def validate_distance(cls, v):
+        if v is not None:
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError("distance_cm must be a finite number")
+            if v < 0:
+                raise ValueError("distance_cm cannot be negative")
+        return v
+
 
 class TrafficSignalData(BaseModel):
     state: TrafficState
@@ -33,14 +44,31 @@ class TrafficSignalData(BaseModel):
 class TelemetryPayload(BaseModel):
     device_id: str
     timestamp: Optional[datetime] = None
+    seq: Optional[int] = None
+    uptime_ms: Optional[int] = None
+    host_rx_ns: Optional[int] = None
     sensors: List[SensorData]
     traffic_signal: Optional[TrafficSignalData] = None
+
+    @field_validator("timestamp")
+    @classmethod
+    def validate_timestamp(cls, v):
+        if v is not None:
+            if v.tzinfo is None:
+                return v.replace(tzinfo=timezone.utc)
+            return v.astimezone(timezone.utc)
+        return datetime.now(timezone.utc)
 
     @field_validator("sensors")
     @classmethod
     def validate_sensors(cls, v):
         if len(v) > 6:
             raise ValueError("Maximum 6 sensors allowed")
+        if len(v) == 0:
+            raise ValueError("Sensors list cannot be empty")
+        sensor_ids = [s.sensor_id for s in v]
+        if len(sensor_ids) != len(set(sensor_ids)):
+            raise ValueError("Duplicate sensor IDs in telemetry packet")
         return v
 
 
@@ -98,7 +126,7 @@ class DeviceStatusOut(BaseModel):
     device_type: str
     connection_status: str
     last_seen: Optional[datetime]
-    timestamp: datetime
+    timestamp: Optional[datetime] = None
 
 
 class AnalyticsSummary(BaseModel):
@@ -126,6 +154,13 @@ class ThresholdConfig(BaseModel):
     warning_cm: float = 100.0
     caution_cm: float = 150.0
     max_range_cm: float = 400.0
+
+    @field_validator("critical_cm")
+    @classmethod
+    def validate_critical(cls, v):
+        if v <= 0:
+            raise ValueError("critical_cm must be positive")
+        return v
 
     @field_validator("warning_cm")
     @classmethod

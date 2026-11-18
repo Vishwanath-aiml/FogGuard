@@ -1,11 +1,10 @@
 """Warning engine — generates deduplicated, event-based warnings from sensor data.
-
-OPTIMIZATION (Phase 4/5): accept a shared `now` timestamp so the caller
-calls datetime.now() once per tick instead of once per sensor.
 """
 from typing import Dict, Optional, Tuple
 from datetime import datetime, timezone
 import logging
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class WarningEngine:
     COOLDOWN_SECONDS = 10  # min seconds between same-sensor same-level warnings
 
     def __init__(self):
-        # last_warnings: sensor_id -> (level, timestamp)
+        # sensor_id -> (level, timestamp)
         self._last_warnings: Dict[str, Tuple[str, datetime]] = {}
 
     def classify_distance(
@@ -56,18 +55,27 @@ class WarningEngine:
         self, sensor_id: str, level: str, now: datetime
     ) -> bool:
         if level in ("SAFE", "CLEAR"):
+            # Update sensor tracking to SAFE/CLEAR so a future approach triggers immediately
+            self._last_warnings[sensor_id] = (level, now)
             return False
+
         last = self._last_warnings.get(sensor_id)
         if last is None:
             return True
+
         last_level, last_time = last
         if last_level != level:
             return True
+
         # Ensure last_time is timezone aware for comparison
         if last_time.tzinfo is None:
             last_time = last_time.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
         if (now - last_time).total_seconds() >= self.COOLDOWN_SECONDS:
             return True
+
         return False
 
     def build_warning_message(
@@ -77,7 +85,7 @@ class WarningEngine:
         distance_cm: Optional[float],
         level: str,
     ) -> str:
-        zone_name = ZONE_DISPLAY.get(zone, zone)
+        zone_name = ZONE_DISPLAY.get(zone, zone.replace("_", " ").title())
         dist_str = f"{distance_cm:.0f}" if distance_cm is not None else "?"
         if level == "CRITICAL":
             return f"CRITICAL: Obstacle detected {dist_str} cm in {zone_name} zone [{sensor_id}]"
@@ -98,12 +106,11 @@ class WarningEngine:
         """
         Process a sensor reading and return a warning dict if one should be generated,
         or None if no warning is needed.
-        
-        OPTIMIZATION: accepts an optional `now` so the caller can pass a single
-        timestamp for the whole tick instead of calling datetime.now() per sensor.
         """
         if now is None:
             now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
 
         th = thresholds or {}
         level = self.classify_distance(
@@ -128,6 +135,23 @@ class WarningEngine:
             "acknowledged": False,
             "timestamp": now,
         }
+
+    async def init_from_db(self, db: AsyncSession):
+        """Restore last warning state per sensor from the database on startup."""
+        try:
+            from app.models.sensor import WarningEvent
+            result = await db.execute(
+                select(WarningEvent).order_by(desc(WarningEvent.timestamp)).limit(50)
+            )
+            events = result.scalars().all()
+            for ev in reversed(events):
+                ts = ev.timestamp
+                if ts and ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                self._last_warnings[ev.sensor_id] = (ev.warning_level, ts)
+            logger.info(f"WarningEngine restored state for {len(self._last_warnings)} sensors from DB")
+        except Exception as e:
+            logger.warning(f"Could not restore warning state from DB: {e}")
 
     def reset(self):
         self._last_warnings.clear()

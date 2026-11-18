@@ -1,4 +1,4 @@
-// Global state store using Zustand
+// Global state store using Zustand with high-frequency telemetry optimizations
 import { create } from 'zustand';
 import type { SensorReading, TrafficSignalStatus, WarningEvent, ThresholdConfig } from '../types';
 
@@ -16,6 +16,13 @@ export interface SystemState {
   trafficSignal: TrafficSignalStatus | null;
   lastUpdate: string | null;
 
+  // Real-time Latency & Telemetry Diagnostics
+  telemetryFps: number;
+  backendLatencyMs: number;
+  networkLatencyMs: number;
+  telemetrySeq: number;
+  lastPacketTime: number;
+
   // Warnings
   activeWarnings: WarningEvent[];
   warningHistory: WarningEvent[];
@@ -30,13 +37,16 @@ export interface SystemState {
   setBackendConnected: (v: boolean) => void;
   setSimulationRunning: (v: boolean) => void;
   setSimulationScenario: (v: string) => void;
-  updateFromTelemetry: (msg: any) => void;
+  updateFromTelemetry: (msg: any, rxTimeMs?: number) => void;
   acknowledgeWarning: (id: number) => void;
   acknowledgeAll: () => void;
   setMuted: (v: boolean) => void;
   setThresholds: (t: ThresholdConfig) => void;
   addWarnings: (warnings: WarningEvent[]) => void;
 }
+
+let lastRxTime = 0;
+let smoothedFps = 10.0;
 
 export const useStore = create<SystemState>((set, get) => ({
   wsConnected: false,
@@ -49,6 +59,12 @@ export const useStore = create<SystemState>((set, get) => ({
   sensors: [],
   trafficSignal: null,
   lastUpdate: null,
+
+  telemetryFps: 10.0,
+  backendLatencyMs: 0.5,
+  networkLatencyMs: 1.0,
+  telemetrySeq: 0,
+  lastPacketTime: 0,
 
   activeWarnings: [],
   warningHistory: [],
@@ -67,19 +83,39 @@ export const useStore = create<SystemState>((set, get) => ({
   setSimulationRunning: (v) => set({ simulationRunning: v }),
   setSimulationScenario: (v) => set({ simulationScenario: v }),
 
-  updateFromTelemetry: (msg) => {
+  updateFromTelemetry: (msg, rxTimeMs) => {
     if (msg.type !== 'telemetry') return;
 
+    const now = rxTimeMs || performance.now();
+    if (lastRxTime > 0) {
+      const dt = (now - lastRxTime) / 1000.0;
+      if (dt > 0.005 && dt < 2.0) {
+        const instantFps = 1.0 / dt;
+        smoothedFps = smoothedFps * 0.85 + instantFps * 0.15;
+      }
+    }
+    lastRxTime = now;
+
+    // Extract latency metrics
+    const perf = msg.perf || {};
+    const backendProc = perf.backend_proc_ms ?? 0.5;
+    let netLatency = 1.0;
+    if (perf.host_tx_ms) {
+      netLatency = Math.max(0.1, Date.now() - perf.host_tx_ms);
+    }
+
     const newWarnings: WarningEvent[] = msg.new_warnings || [];
-    const existing = get().activeWarnings;
+    let allWarnings = get().activeWarnings;
+    let unackCount = get().unacknowledgedCount;
 
-    // Add new warnings to front, deduplicate by id
-    const allWarnings = [
-      ...newWarnings,
-      ...existing.filter((w) => !newWarnings.find((n) => n.id === w.id)),
-    ].slice(0, 100); // Keep last 100
-
-    const unackCount = allWarnings.filter((w) => !w.acknowledged).length;
+    // Only modify warnings array when new warnings actually arrive
+    if (newWarnings.length > 0) {
+      allWarnings = [
+        ...newWarnings,
+        ...allWarnings.filter((w) => !newWarnings.find((n) => n.id === w.id)),
+      ].slice(0, 100);
+      unackCount = allWarnings.filter((w) => !w.acknowledged).length;
+    }
 
     set({
       sensors: msg.sensors || [],
@@ -87,6 +123,11 @@ export const useStore = create<SystemState>((set, get) => ({
       lastUpdate: msg.timestamp,
       simulationMode: msg.simulation_mode,
       dataSource: msg.source,
+      telemetryFps: Math.round(smoothedFps * 10) / 10,
+      backendLatencyMs: backendProc,
+      networkLatencyMs: Math.round(netLatency * 10) / 10,
+      telemetrySeq: perf.seq ?? (get().telemetrySeq + 1),
+      lastPacketTime: now,
       activeWarnings: allWarnings,
       unacknowledgedCount: unackCount,
     });
@@ -113,18 +154,5 @@ export const useStore = create<SystemState>((set, get) => ({
 
   setMuted: (v) => set({ muted: v }),
   setThresholds: (t) => set({ thresholds: t }),
-
-  addWarnings: (warnings) => {
-    set((state) => {
-      const existing = state.activeWarnings;
-      const merged = [
-        ...warnings,
-        ...existing.filter((w) => !warnings.find((n) => n.id === w.id)),
-      ].slice(0, 100);
-      return {
-        activeWarnings: merged,
-        unacknowledgedCount: merged.filter((w) => !w.acknowledged).length,
-      };
-    });
-  },
+  addWarnings: (warnings) => set((s) => ({ activeWarnings: [...warnings, ...s.activeWarnings] })),
 }));

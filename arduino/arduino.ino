@@ -1,154 +1,304 @@
+/*
+ * ==============================================================================
+ * Project: FogGuard — Low-Latency Ultrasonic Obstacle Detection & ADAS HUD
+ * Module: Canonical High-Performance Interrupt-Driven (PCINT) Firmware
+ * Target: Arduino Uno / Nano (ATmega328P)
+ * Baud: 115200 baud
+ *
+ * Real-Time Architecture:
+ * - Pin Change Interrupts (PCINT2_vect on Port D, pins 2..7):
+ *   Captures ultrasonic ECHO rising and falling edges with microsecond precision.
+ *   Zero blocking while waiting for echoes.
+ * - Non-blocking round-robin ultrasonic state machine:
+ *   Staggers sensor triggers by 25 ms (the physical propagation limit for 400 cm
+ *   plus acoustic reverberation / decay damping to eliminate ghost echoes).
+ * - High-speed JSON telemetry transmission:
+ *   Transmits a single, coherent, compact JSON telemetry frame per sweep:
+ *   {"seq":1024,"up":45120,"traffic":"GREEN","dur":25,"sensors":[...]}
+ *   Includes sequence number, device uptime, and all sensors (with null if no echo).
+ * - Physical Update Rates:
+ *   - 4-sensor configuration (default): 10.0 Hz (100 ms full sweep)
+ *   - 6-sensor configuration:          6.67 Hz (150 ms full sweep)
+ * ==============================================================================
+ */
 
-// byte ensures it takes 1 byte instead of standart 2 bytes unneccesarily
-// If u change these numbers (For ECHO ONLY) u must change the interrupt reciever as well (PCMSK2)
-const byte TRIG_1 = 8;
-const byte ECHO_1 = 2;
+#include <Arduino.h>
 
-const byte TRIG_2 = 9;
-const byte ECHO_2 = 3;
+// ─── Physical Sensor Configuration ──────────────────────────────────────────
+// Set to 4 for 10.0 Hz (100 ms period) or 6 for 6.67 Hz (150 ms period)
+#define SENSOR_COUNT 6
 
-const byte TRIG_3 = 10;
-const byte ECHO_3 = 4;
+  const uint8_t TRIG_PINS[6] = {10, 13, 9, 12, 11, 8};
+  const uint8_t ECHO_PINS[6] = {4, 7, 3, 6, 5, 2}; // Port D pins 2..7 (PCINT18..23)
+  const char* SENSOR_IDS[6] = {"S1", "S2", "S3", "S4", "S5", "S6"};
+  const char* SENSOR_ZONES[6] = {
+    "front_left",
+    "front_center_left",
+    "front_center_right",
+    "front_right",
+    "left_side",
+    "right_side"
+  };
+  const unsigned long TELEMETRY_INTERVAL_MS = 150; // 6.67 Hz for 6 sensors (speed-of-sound limit)
 
-const byte TRIG_4 = 11;
-const byte ECHO_4 = 5;
+// ─── Ultrasonic Physics & Thresholds ─────────────────────────────────────────
+// Speed of sound at 20°C: ~343 m/s = 0.0343 cm/us (58.3 us/cm round trip)
+// 400 cm * 58.3 us/cm = 23,320 us max round-trip echo travel time.
+const unsigned long ECHO_TIMEOUT_US     = 23320UL; // 400 cm maximum window
+const unsigned long MIN_ECHO_US        = 116UL;   // ~2 cm physical limit
+const float         MIN_DISTANCE_CM    = 2.0;
+const float         MAX_DISTANCE_CM    = 400.0;
+const float         CAUTION_THRESHOLD_CM = 150.0;
 
-const byte TRIG_5 = 12;
-const byte ECHO_5 = 6;
+// Inter-sensor trigger stagger: 25 ms allows echo travel (23.3 ms) + 1.7 ms acoustic decay
+const unsigned long SENSOR_STEP_INTERVAL_MS = 25;
 
-const byte TRIG_6 = 13;
-const byte ECHO_6 = 7;
+// ─── Traffic Signal Definitions ──────────────────────────────────────────────
+const uint8_t PIN_LED_RED    = A0;
+const uint8_t PIN_LED_YELLOW = A1;
+const uint8_t PIN_LED_GREEN  = A2;
 
-// volatile used to say that this value can abruptly change
-// Some times it might reject abrupt changes as accidental in default var types
-volatile unsigned long startTime[6] = {0, 0, 0, 0, 0, 0};
-volatile unsigned long endTime[6] = {0, 0, 0, 0, 0, 0};
-volatile bool echoComplete[6] = {false, false, false, false, false, false};
-volatile byte previousState = 0;
+const unsigned long DURATION_RED    = 30; // Seconds
+const unsigned long DURATION_GREEN  = 25; // Seconds
+const unsigned long DURATION_YELLOW = 5;  // Seconds
 
-float distance[6] = {0, 0, 0, 0, 0, 0};
+enum TrafficState { STATE_RED, STATE_GREEN, STATE_YELLOW };
+TrafficState currentTrafficState = STATE_RED;
+unsigned long trafficStateStartTime = 0;
 
+// ─── Interrupt Echo Storage (Atomic access via cli/sei) ──────────────────────
+volatile unsigned long echoStartTime[SENSOR_COUNT];
+volatile unsigned long echoEndTime[SENSOR_COUNT];
+volatile bool echoReceived[SENSOR_COUNT];
+volatile bool echoMeasuring[SENSOR_COUNT];
+volatile uint8_t previousPinDState = 0;
+
+// Filtered calculated distances
+float currentDistances[SENSOR_COUNT];
+bool  obstacleDetected[SENSOR_COUNT];
+
+// Telemetry & Sequencer State
+uint8_t currentSensorIndex = 0;
+unsigned long lastTriggerTime = 0;
+unsigned long lastTelemetryBroadcast = 0;
+unsigned long telemetrySeq = 0;
+
+// ─── Pin Change Interrupt Service Routine for Port D (Pins D0-D7) ────────────
+ISR(PCINT2_vect) {
+  uint8_t currentPinD = PIND;
+  uint8_t changedPins = currentPinD ^ previousPinDState;
+  unsigned long now = micros();
+
+  // Inspect each configured echo pin (D2 through D5 or D7)
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    uint8_t pinBit = 1 << ECHO_PINS[i];
+    if (changedPins & pinBit) {
+      if (currentPinD & pinBit) {
+        // Rising edge: pulse began
+        echoStartTime[i] = now;
+        echoMeasuring[i] = true;
+      } else if (echoMeasuring[i]) {
+        // Falling edge: pulse completed
+        echoEndTime[i] = now;
+        echoReceived[i] = true;
+        echoMeasuring[i] = false;
+      }
+    }
+  }
+
+  previousPinDState = currentPinD;
+}
+
+// ─── Trigger Next Ultrasonic Sensor ──────────────────────────────────────────
+void triggerSensor(uint8_t index) {
+  // Clear measurement flags atomically
+  cli();
+  echoReceived[index]  = false;
+  echoMeasuring[index] = false;
+  echoStartTime[index] = 0;
+  echoEndTime[index]   = 0;
+  sei();
+
+  // 10 microsecond trigger pulse
+  digitalWrite(TRIG_PINS[index], LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PINS[index], HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PINS[index], LOW);
+
+  lastTriggerTime = millis();
+}
+
+// ─── Calculate Distance for Previously Triggered Sensor ──────────────────────
+void processSensorResult(uint8_t index) {
+  unsigned long start, end;
+  bool received;
+
+  cli();
+  start = echoStartTime[index];
+  end = echoEndTime[index];
+  received = echoReceived[index];
+  echoReceived[index] = false;
+  sei();
+
+  if (received && (end > start)) {
+    unsigned long pulseDuration = end - start;
+    if (pulseDuration >= MIN_ECHO_US && pulseDuration <= ECHO_TIMEOUT_US) {
+      // Speed of sound: duration / 58.0 us per cm
+      float dist = (float)pulseDuration / 58.0;
+      if (dist >= MIN_DISTANCE_CM && dist <= MAX_DISTANCE_CM) {
+        currentDistances[index] = dist;
+        obstacleDetected[index] = (dist <= CAUTION_THRESHOLD_CM);
+        return;
+      }
+    }
+  }
+
+  // No valid echo received or out of valid physical range
+  currentDistances[index] = -1.0;
+  obstacleDetected[index] = false;
+}
+
+// ─── Traffic Signal Controller ───────────────────────────────────────────────
+void setTrafficLeds(TrafficState state) {
+  digitalWrite(PIN_LED_RED,    state == STATE_RED    ? HIGH : LOW);
+  digitalWrite(PIN_LED_YELLOW, state == STATE_YELLOW ? HIGH : LOW);
+  digitalWrite(PIN_LED_GREEN,  state == STATE_GREEN  ? HIGH : LOW);
+}
+
+const char* getTrafficStateName(TrafficState state) {
+  switch (state) {
+    case STATE_RED:    return "RED";
+    case STATE_YELLOW: return "YELLOW";
+    case STATE_GREEN:  return "GREEN";
+    default:           return "UNKNOWN";
+  }
+}
+
+unsigned long getTrafficStateDuration(TrafficState state) {
+  switch (state) {
+    case STATE_RED:    return DURATION_RED;
+    case STATE_YELLOW: return DURATION_YELLOW;
+    case STATE_GREEN:  return DURATION_GREEN;
+    default:           return 0;
+  }
+}
+
+void updateTrafficSignal() {
+  unsigned long elapsedSec = (millis() - trafficStateStartTime) / 1000;
+  unsigned long currentDuration = getTrafficStateDuration(currentTrafficState);
+
+  if (elapsedSec >= currentDuration) {
+    switch (currentTrafficState) {
+      case STATE_RED:    currentTrafficState = STATE_GREEN;  break;
+      case STATE_GREEN:  currentTrafficState = STATE_YELLOW; break;
+      case STATE_YELLOW: currentTrafficState = STATE_RED;    break;
+    }
+    trafficStateStartTime = millis();
+    setTrafficLeds(currentTrafficState);
+  }
+}
+
+// ─── Single Compact JSON Telemetry Frame Transmission ────────────────────────
+void broadcastTelemetry() {
+  unsigned long now = millis();
+  telemetrySeq++;
+
+  // Emit a single compact JSON-line:
+  // {"seq":1,"up":1234,"traffic":"RED","dur":30,"sensors":[{"id":"S1","zone":"front_left","dist":45.2,"det":true},...]}
+  Serial.print("{\"seq\":");
+  Serial.print(telemetrySeq);
+  Serial.print(",\"up\":");
+  Serial.print(now);
+  Serial.print(",\"traffic\":\"");
+  Serial.print(getTrafficStateName(currentTrafficState));
+  Serial.print("\",\"dur\":");
+  Serial.print(getTrafficStateDuration(currentTrafficState));
+  Serial.print(",\"sensors\":[");
+
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    if (i > 0) Serial.print(",");
+    Serial.print("{\"id\":\"");
+    Serial.print(SENSOR_IDS[i]);
+    Serial.print("\",\"zone\":\"");
+    Serial.print(SENSOR_ZONES[i]);
+    Serial.print("\",\"dist\":");
+    if (currentDistances[i] > 0) {
+      Serial.print(currentDistances[i], 1);
+    } else {
+      Serial.print("null");
+    }
+    Serial.print(",\"det\":");
+    Serial.print(obstacleDetected[i] ? "true" : "false");
+    Serial.print("}");
+  }
+
+  Serial.println("]}");
+}
+
+// ─── Arduino Setup ───────────────────────────────────────────────────────────
 void setup() {
+  // Use high-speed 115200 baud to eliminate serial transmission latency
   Serial.begin(115200);
 
-  pinMode(TRIG_1, OUTPUT);
-  pinMode(ECHO_1, INPUT);
-
-  pinMode(TRIG_2, OUTPUT);
-  pinMode(ECHO_2, INPUT);
-
-  pinMode(TRIG_3, OUTPUT);
-  pinMode(ECHO_3, INPUT);
-
-  pinMode(TRIG_4, OUTPUT);
-  pinMode(ECHO_4, INPUT);
-
-  pinMode(TRIG_5, OUTPUT);
-  pinMode(ECHO_5, INPUT);
-
-  pinMode(TRIG_6, OUTPUT);
-  pinMode(ECHO_6, INPUT);
-
-  for (byte i = 0; i < 6; i++) {
-    digitalWrite(TRIG_1 + i, LOW);
+  // Initialize Ultrasonic Pins
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    pinMode(TRIG_PINS[i], OUTPUT);
+    digitalWrite(TRIG_PINS[i], LOW);
+    pinMode(ECHO_PINS[i], INPUT);
+    currentDistances[i] = -1.0;
+    obstacleDetected[i] = false;
   }
 
-  noInterrupts();
+  // Initialize Traffic Signal LED Pins
+  pinMode(PIN_LED_RED, OUTPUT);
+  pinMode(PIN_LED_YELLOW, OUTPUT);
+  pinMode(PIN_LED_GREEN, OUTPUT);
 
-  previousState = PIND;
+  // Record initial Port D state
+  previousPinDState = PIND;
 
-  PCMSK2 |= (1 << PCINT18);
-  PCMSK2 |= (1 << PCINT19);
-  PCMSK2 |= (1 << PCINT20);
-  PCMSK2 |= (1 << PCINT21);
-  PCMSK2 |= (1 << PCINT22);
-  PCMSK2 |= (1 << PCINT23);
-
-  PCIFR |= (1 << PCIF2);
+  // Configure Pin Change Interrupts on Port D (PCINT2 group covers D0-D7)
   PCICR |= (1 << PCIE2);
 
-  interrupts();
-}
-
-void loop() {
-
-  for (byte i = 0; i < 6; i++) {
-
-    noInterrupts();
-
-    echoComplete[i] = false;
-    startTime[i] = 0;
-    endTime[i] = 0;
-
-    interrupts();
-
-    digitalWrite(TRIG_1 + i, LOW);
-    delayMicroseconds(2);
-
-    digitalWrite(TRIG_1 + i, HIGH);
-    delayMicroseconds(10);
-
-    digitalWrite(TRIG_1 + i, LOW);
-
-    unsigned long triggerTime = micros();
-
-    while (!echoComplete[i] && micros() - triggerTime < 25000UL) {
-    }
-
-    noInterrupts();
-
-    bool completed = echoComplete[i];
-    unsigned long start = startTime[i];
-    unsigned long end = endTime[i];
-
-    echoComplete[i] = false;
-
-    interrupts();
-
-    if (completed) {
-
-      unsigned long duration = end - start;
-
-      distance[i] = duration / 58.0;
-
-      Serial.print("Sensor ");
-      Serial.print(i + 1);
-      Serial.print(": ");
-      Serial.print(distance[i]);
-      Serial.println(" cm");
-
-    }
-    else {
-      Serial.print("Sensor ");
-      Serial.print(i + 1);
-      Serial.println(": No Echo");
-    }
-
-    delay(30);
+  // Unmask the echo pins: D2..D5 for 4 sensors, D2..D7 for 6 sensors
+  uint8_t mask = 0;
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    // ECHO_PINS are on Port D, pin 2 is PCINT18, pin 3 is PCINT19, etc.
+    mask |= (1 << (PCINT18 + (ECHO_PINS[i] - 2)));
   }
+  PCMSK2 |= mask;
+
+  // Initialize traffic state
+  trafficStateStartTime = millis();
+  setTrafficLeds(currentTrafficState);
+
+  // Trigger the first sensor
+  triggerSensor(0);
 }
 
-ISR(PCINT2_vect) {
+// ─── Main Real-Time Loop (Zero Blocking Delays) ──────────────────────────────
+void loop() {
+  unsigned long now = millis();
 
-  byte currentState = PIND;
+  // 1. Service Traffic Signal State Machine
+  updateTrafficSignal();
 
-  byte changedPins = currentState ^ previousState;
+  // 2. Round-Robin Sensor Sequencer (25 ms per sensor step)
+  if (now - lastTriggerTime >= SENSOR_STEP_INTERVAL_MS) {
+    // Process results from previously triggered sensor
+    processSensorResult(currentSensorIndex);
 
-  previousState = currentState;
+    // Advance to next sensor
+    currentSensorIndex = (currentSensorIndex + 1) % SENSOR_COUNT;
 
-  for (byte i = 0; i < 6; i++) {
+    // Trigger next sensor
+    triggerSensor(currentSensorIndex);
+  }
 
-    byte pinMask = (1 << (i + 2));
-
-    if (changedPins & pinMask) {
-
-      if (currentState & pinMask) {
-        startTime[i] = micros();
-      }
-      else {
-        endTime[i] = micros();
-        echoComplete[i] = true;
-      }
-    }
+  // 3. Telemetry Broadcast at Target Frequency (10 Hz for 4 sensors)
+  if (now - lastTelemetryBroadcast >= TELEMETRY_INTERVAL_MS) {
+    lastTelemetryBroadcast = now;
+    broadcastTelemetry();
   }
 }

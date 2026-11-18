@@ -26,9 +26,10 @@ export function useWebSocket() {
 
       ws.onmessage = (event) => {
         try {
+          const rxTime = performance.now();
           const msg = JSON.parse(event.data);
           if (msg.type === 'ping') return;
-          updateFromTelemetry(msg);
+          updateFromTelemetry(msg, rxTime);
 
           // Audio alert for critical warnings
           if (!muted && msg.new_warnings?.some((w: any) => w.warning_level === 'CRITICAL')) {

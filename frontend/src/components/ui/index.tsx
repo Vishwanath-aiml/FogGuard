@@ -13,20 +13,20 @@ interface CardProps {
 export function Card({ children, className, title, titleIcon, headerRight }: CardProps) {
   return (
     <div
-      className={cn('rounded-xl border overflow-hidden', className)}
-      style={{ background: 'rgba(6, 15, 46, 0.7)', borderColor: 'rgba(13, 32, 112, 0.5)' }}
+      className={cn('rounded-xl border overflow-hidden shadow-lg shadow-black/20', className)}
+      style={{ background: 'rgba(6, 15, 46, 0.75)', borderColor: 'rgba(13, 32, 112, 0.45)' }}
     >
       {title && (
-        <div className="flex items-center justify-between px-4 py-3 border-b"
-          style={{ borderColor: 'rgba(13, 32, 112, 0.5)' }}>
-          <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b"
+          style={{ borderColor: 'rgba(13, 32, 112, 0.4)', background: 'rgba(2, 8, 24, 0.3)' }}>
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-200 uppercase tracking-wide">
             {titleIcon}
             {title}
           </div>
           {headerRight}
         </div>
       )}
-      <div className="p-4">{children}</div>
+      <div className="p-3.5">{children}</div>
     </div>
   );
 }
@@ -64,17 +64,22 @@ interface StatCardProps {
 export function StatCard({ label, value, icon, color = '#22d3ee', sub }: StatCardProps) {
   return (
     <div
-      className="rounded-xl p-4 flex flex-col gap-2 border"
-      style={{ background: 'rgba(6, 15, 46, 0.7)', borderColor: 'rgba(13, 32, 112, 0.5)' }}
+      className="rounded-xl p-4 flex flex-col gap-1.5 border relative overflow-hidden group transition-all duration-300 hover:border-opacity-80"
+      style={{
+        background: 'rgba(6, 15, 46, 0.75)',
+        borderColor: 'rgba(13, 32, 112, 0.5)',
+        borderLeftWidth: '3px',
+        borderLeftColor: color,
+      }}
     >
       <div className="flex items-center gap-2">
-        {icon && <span style={{ color }}>{icon}</span>}
-        <span className="text-xs text-slate-400 uppercase tracking-wider">{label}</span>
+        {icon && <span className="opacity-80" style={{ color }}>{icon}</span>}
+        <span className="text-[11px] text-slate-400 uppercase tracking-wider font-medium">{label}</span>
       </div>
-      <div className="text-2xl font-bold font-mono" style={{ color }}>
+      <div className="text-2xl font-bold font-mono tracking-tight" style={{ color }}>
         {value}
       </div>
-      {sub && <div className="text-xs text-slate-500">{sub}</div>}
+      {sub && <div className="text-[11px] text-slate-500 truncate">{sub}</div>}
     </div>
   );
 }
@@ -155,14 +160,14 @@ export function SensorRow({ sensor }: { sensor: SensorReading }) {
   const style = warningLevelBg(sensor.warning_level);
 
   return (
-    <div className={cn('flex items-center justify-between p-2.5 rounded-lg border', style)}>
-      <div className="flex items-center gap-3">
-        <span className="font-mono text-sm font-semibold w-6">{sensor.sensor_id}</span>
-        <span className="text-xs text-slate-400">{zoneName}</span>
+    <div className={cn('flex items-center justify-between p-2 rounded-lg border transition-all duration-200', style)}>
+      <div className="flex items-center gap-2.5">
+        <span className="font-mono text-xs font-bold w-7 text-center px-1 py-0.5 rounded bg-black/20">{sensor.sensor_id}</span>
+        <span className="text-xs text-slate-400 truncate">{zoneName}</span>
       </div>
-      <div className="flex items-center gap-3">
-        <span className="font-mono text-sm">{formatDistance(sensor.distance_cm)}</span>
-        <span className="text-xs font-semibold w-16 text-right">{sensor.warning_level}</span>
+      <div className="flex items-center gap-2.5">
+        <span className="font-mono text-sm font-semibold tabular-nums">{formatDistance(sensor.distance_cm)}</span>
+        <span className="text-[10px] font-bold w-16 text-right uppercase tracking-wide">{sensor.warning_level}</span>
       </div>
     </div>
   );

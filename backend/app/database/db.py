@@ -1,25 +1,38 @@
 """
 Async database engine — uses aiosqlite so DB I/O never blocks the event loop.
-
-OPTIMIZATION: Replaced synchronous create_engine/sessionmaker with async
-equivalents. This is the single biggest win for real-time performance:
-disk I/O now runs in aiosqlite's background thread, not on the asyncio loop.
 """
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
+from sqlalchemy import event
 from app.core.config import settings
 
-# Convert sqlite:///./fogguard.db → sqlite+aiosqlite:///./fogguard.db
-_raw_url = settings.DATABASE_URL
-if _raw_url.startswith("sqlite:///"):
-    SQLALCHEMY_DATABASE_URL = _raw_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
-else:
-    SQLALCHEMY_DATABASE_URL = _raw_url
+def get_async_database_url(url: str) -> str:
+    """Ensure SQLite URLs use the async aiosqlite driver."""
+    if url.startswith("sqlite:///"):
+        return url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+    if url.startswith("sqlite:"):
+        return url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+    return url
+
+SQLALCHEMY_DATABASE_URL = get_async_database_url(settings.DATABASE_URL)
 
 engine = create_async_engine(
     SQLALCHEMY_DATABASE_URL,
-    # aiosqlite handles thread-safety internally — no check_same_thread needed
+    echo=False,
+    future=True,
 )
+
+# Apply SQLite performance & concurrency PRAGMAs
+@event.listens_for(engine.sync_engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    try:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+    except Exception:
+        pass
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
@@ -33,7 +46,11 @@ Base = declarative_base()
 async def get_db():
     """FastAPI dependency — yields an AsyncSession, auto-closes on exit."""
     async with AsyncSessionLocal() as session:
-        yield session
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
 
 
 async def init_db():

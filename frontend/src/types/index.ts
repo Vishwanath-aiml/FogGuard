@@ -27,6 +27,13 @@ export interface TrafficSignalStatus {
   duration_seconds: number | null;
 }
 
+export interface TelemetryPerf {
+  seq?: number;
+  uptime_ms?: number;
+  backend_proc_ms?: number;
+  host_tx_ms?: number;
+}
+
 export interface TelemetryMessage {
   type: 'telemetry' | 'ping';
   source: 'simulation' | 'hardware' | 'none';
@@ -35,6 +42,7 @@ export interface TelemetryMessage {
   traffic_signal: TrafficSignalStatus | null;
   new_warnings: WarningEvent[];
   simulation_mode: boolean;
+  perf?: TelemetryPerf;
 }
 
 export interface WarningEvent {

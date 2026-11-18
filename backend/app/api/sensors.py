@@ -8,7 +8,7 @@ from datetime import datetime
 from app.database.db import get_db
 from app.models.sensor import SensorReading, ObstacleEvent
 from app.schemas.schemas import SensorReadingOut, ObstacleEventOut
-from app.api.iot import _last_telemetry
+from app.api.iot import get_last_telemetry
 
 router = APIRouter()
 
@@ -16,9 +16,10 @@ router = APIRouter()
 @router.get("/sensors/latest", summary="Get latest sensor readings")
 async def get_latest_sensors():
     """Returns the most recently broadcast sensor data."""
-    if not _last_telemetry:
+    latest = get_last_telemetry()
+    if not latest:
         return {"sensors": [], "timestamp": None, "source": "none"}
-    return _last_telemetry
+    return latest
 
 
 @router.get("/sensors/history", response_model=List[SensorReadingOut], summary="Get sensor reading history")
