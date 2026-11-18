@@ -26,22 +26,10 @@
 
 // ─── Physical Sensor Configuration ──────────────────────────────────────────
 // Set to 4 for 10.0 Hz (100 ms period) or 6 for 6.67 Hz (150 ms period)
-#define SENSOR_COUNT 4
+#define SENSOR_COUNT 6
 
-#if SENSOR_COUNT == 4
-  const uint8_t TRIG_PINS[4] = {8, 9, 10, 11};
-  const uint8_t ECHO_PINS[4] = {2, 3, 4, 5};   // Port D pins 2..5 (PCINT18..21)
-  const char* SENSOR_IDS[4] = {"S1", "S2", "S3", "S4"};
-  const char* SENSOR_ZONES[4] = {
-    "front_left",
-    "front_center",
-    "front_right",
-    "roof_center"
-  };
-  const unsigned long TELEMETRY_INTERVAL_MS = 100; // 10.0 Hz for 4 sensors
-#elif SENSOR_COUNT == 6
-  const uint8_t TRIG_PINS[6] = {8, 9, 10, 11, 12, 13};
-  const uint8_t ECHO_PINS[6] = {2, 3, 4, 5, 6, 7}; // Port D pins 2..7 (PCINT18..23)
+  const uint8_t TRIG_PINS[6] = {10, 13, 9, 12, 11, 8};
+  const uint8_t ECHO_PINS[6] = {4, 7, 3, 6, 5, 2}; // Port D pins 2..7 (PCINT18..23)
   const char* SENSOR_IDS[6] = {"S1", "S2", "S3", "S4", "S5", "S6"};
   const char* SENSOR_ZONES[6] = {
     "front_left",
@@ -52,9 +40,6 @@
     "right_side"
   };
   const unsigned long TELEMETRY_INTERVAL_MS = 150; // 6.67 Hz for 6 sensors (speed-of-sound limit)
-#else
-  #error "SENSOR_COUNT must be either 4 or 6"
-#endif
 
 // ─── Ultrasonic Physics & Thresholds ─────────────────────────────────────────
 // Speed of sound at 20°C: ~343 m/s = 0.0343 cm/us (58.3 us/cm round trip)

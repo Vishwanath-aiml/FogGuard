@@ -110,20 +110,20 @@ def parse_line(line: str):
         sensor_buffer = {}  # new sweep starts: drop any leftovers
     sensor_buffer[f"S{idx}"] = float(m.group(2)) if m.group(2) else None
 
-    # 4-sensor sweep completion check
-    if idx == 4 and NUM_SENSORS == 4:
-        sensors = []
-        for i in range(1, 5):
-            sid = f"S{i}"
-            dist = sensor_buffer.get(sid)
-            sensors.append({
-                "id": sid,
-                "zone": ZONE_MAP_4[sid],
-                "dist": dist,
-                "det": (dist is not None and dist <= DETECT_THRESHOLD_CM),
-            })
-        sensor_buffer = {}
-        return {"sensors": sensors}
+    # # 4-sensor sweep completion check
+    # if idx == 4 and NUM_SENSORS == 4:
+    #     sensors = []
+    #     for i in range(1, 5):
+    #         sid = f"S{i}"
+    #         dist = sensor_buffer.get(sid)
+    #         sensors.append({
+    #             "id": sid,
+    #             "zone": ZONE_MAP_4[sid],
+    #             "dist": dist,
+    #             "det": (dist is not None and dist <= DETECT_THRESHOLD_CM),
+    #         })
+    #     sensor_buffer = {}
+    #     return {"sensors": sensors}
 
     # 6-sensor sweep completion check
     if idx == 6 or len(sensor_buffer) >= 6:
