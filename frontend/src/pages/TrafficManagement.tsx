@@ -94,7 +94,11 @@ export function TrafficManagement() {
               </div>
               <div>
                 <div className="text-slate-400 text-xs uppercase tracking-wider mb-1">Hardware</div>
-                <div className="text-slate-200">3 LEDs (R/Y/G) via Arduino</div>
+                <div className="text-slate-200">32=Red · 33=Yellow · 25=Green</div>
+              </div>
+              <div className="col-span-2 rounded border px-3 py-2 text-xs text-amber-300"
+                style={{ borderColor: 'rgba(234, 179, 8, 0.25)', background: 'rgba(234, 179, 8, 0.08)' }}>
+                Note: ESP32 GPIO 34 is input-only. Use GPIO 25 for the green output to drive an LED.
               </div>
             </div>
           </Card>

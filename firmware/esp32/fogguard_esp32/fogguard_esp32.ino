@@ -9,6 +9,8 @@
  *   - ESP32 Pin 16 (RX2) <- Arduino TX
  *   - ESP32 Pin 17 (TX2) -> Arduino RX
  * - Onboard LED: GPIO 2 (Status Indicator)
+ * - Traffic LEDs: Red GPIO 32, Yellow GPIO 33, Green GPIO 25
+ *   - GPIO 34 is input-only on ESP32-WROOM and cannot drive a green LED.
  * 
  * Functional Responsibilities:
  * 1. Connects to Wi-Fi network with persistent auto-reconnect.
@@ -40,6 +42,11 @@ const char* DEVICE_ID     = "fogguard-esp32";
 // Status LED
 #define STATUS_LED 2
 
+// Traffic signal LEDs
+#define TRAFFIC_RED_LED 32
+#define TRAFFIC_YELLOW_LED 33
+#define TRAFFIC_GREEN_LED 25
+
 // NTP Server Settings for UTC timestamping
 const char* NTP_SERVER = "pool.ntp.org";
 const long  GMT_OFFSET_SEC = 0;
@@ -48,6 +55,20 @@ const int   DAYLIGHT_OFFSET_SEC = 0;
 // Bluetooth Serial for diagnostics
 BluetoothSerial SerialBT;
 bool enableBluetooth = true;
+
+void setTrafficLedState(const char* state) {
+  digitalWrite(TRAFFIC_RED_LED, LOW);
+  digitalWrite(TRAFFIC_YELLOW_LED, LOW);
+  digitalWrite(TRAFFIC_GREEN_LED, LOW);
+
+  if (strcmp(state, "RED") == 0) {
+    digitalWrite(TRAFFIC_RED_LED, HIGH);
+  } else if (strcmp(state, "YELLOW") == 0) {
+    digitalWrite(TRAFFIC_YELLOW_LED, HIGH);
+  } else if (strcmp(state, "GREEN") == 0) {
+    digitalWrite(TRAFFIC_GREEN_LED, HIGH);
+  }
+}
 
 // Timing variables
 unsigned long lastHeartbeatTime = 0;
@@ -129,6 +150,12 @@ void setup() {
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
 
+  pinMode(TRAFFIC_RED_LED, OUTPUT);
+  pinMode(TRAFFIC_YELLOW_LED, OUTPUT);
+  pinMode(TRAFFIC_GREEN_LED, OUTPUT);
+  digitalWrite(TRAFFIC_RED_LED, LOW);
+  digitalWrite(TRAFFIC_YELLOW_LED, LOW);
+
   // Initialize Bluetooth Serial for local diagnostics
   if (enableBluetooth) {
     SerialBT.begin("FogGuard-Gateway");
@@ -180,9 +207,11 @@ void loop() {
         }
 
         if (docIn.containsKey("traffic")) {
+          const char* trafficState = docIn["traffic"].as<const char*>();
           JsonObject trafficObj = docOut.createNestedObject("traffic_signal");
-          trafficObj["state"] = docIn["traffic"].as<const char*>();
+          trafficObj["state"] = trafficState;
           trafficObj["duration_seconds"] = docIn["dur"].as<int>();
+          setTrafficLedState(trafficState);
         }
 
         String outputPayload;
