@@ -9,23 +9,27 @@ import { warningLevelColor } from '../../utils';
 import { useStore } from '../../store/useStore';
 
 // Sensor zone 3D positions (relative to vehicle center)
+// Car body is 1.8 wide (±0.9), 3.8 long. Front bumper at z=-1.9.
+// front_left/front_right sit near headlight positions (x=±0.65), not far out to the sides.
 const ZONE_POSITIONS: Record<string, [number, number, number]> = {
-  front_left: [-1.0, 0, -2.5],
-  front_center: [0, 0, -2.5],
-  front_center_left: [-0.35, 0, -2.5],
-  front_center_right: [0.35, 0, -2.5],
-  front_right: [1.0, 0, -2.5],
-  left_side: [-2.2, 0, 0],
-  right_side: [2.2, 0, 0],
+  front_left: [-0.65, 0.18, -1.95],
+  front_center: [0, 0.18, -1.95],
+  front_center_left: [-0.3, 0.18, -1.95],
+  front_center_right: [0.3, 0.18, -1.95],
+  front_right: [0.65, 0.18, -1.95],
+  left_side: [-1.0, 0.35, 0],
+  right_side: [1.0, 0.35, 0],
   roof_center: [0, 1.2, -1.0],
 };
 
+// Direction vectors: front sensors point almost straight forward.
+// front_left/front_right have a very slight outward angle (not splayed wide).
 const ZONE_DIRECTIONS: Record<string, [number, number, number]> = {
-  front_left: [-0.25, 0, -1],
+  front_left: [-0.08, 0, -1],
   front_center: [0, 0, -1],
-  front_center_left: [-0.08, 0, -1],
-  front_center_right: [0.08, 0, -1],
-  front_right: [0.25, 0, -1],
+  front_center_left: [-0.04, 0, -1],
+  front_center_right: [0.04, 0, -1],
+  front_right: [0.08, 0, -1],
   left_side: [-1, 0, 0],
   right_side: [1, 0, 0],
   roof_center: [0, 0.05, -1],
@@ -211,8 +215,13 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
   const dist = safeDistance * SCALE;
 
   const isRoofSensor = zone === 'roof_center';
+  const isSideZone = zone === 'left_side' || zone === 'right_side';
   const size: [number, number, number] = isRoofSensor ? [1.8, 1.2, 2.4] : [1.6, 1.1, 2.4];
   const centerY = isRoofSensor ? 1.4 : size[1] / 2;
+
+  // halfDepth: offset so the NEAREST FACE of the cuboid sits at the measured distance,
+  // not the cuboid center. For side sensors, offset along X (size[0]/2); for forward sensors, offset along Z (size[2]/2).
+  const halfDepth = isSideZone ? size[0] / 2 : size[2] / 2;
 
   const color = warningLevelColor(sensor.warning_level);
   const isCritical = sensor.warning_level === 'CRITICAL';
@@ -230,11 +239,16 @@ function ObstacleCuboid({ zone, sensor }: { zone: string; sensor: SensorReading 
     if (!hasObstacle) return;
 
     const t = clock.getElapsedTime();
-    // Direct position update without JSX churn
+    // Position cuboid so its nearest face is at the measured distance (dist),
+    // then push center out by halfDepth so the face closest to the car is correct.
+    // dir is the normalized-ish direction vector. We need to normalize it for the offset.
+    const dirLen = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    const nx = dir[0] / dirLen;
+    const nz = dir[2] / dirLen;
     groupRef.current.position.set(
-      startPos[0] + dir[0] * dist,
+      startPos[0] + dir[0] * dist + nx * halfDepth,
       centerY + 0.02 * Math.sin(t * 3),
-      startPos[2] + dir[2] * dist
+      startPos[2] + dir[2] * dist + nz * halfDepth
     );
 
     if (bodyMeshRef.current && bodyMeshRef.current.material) {
