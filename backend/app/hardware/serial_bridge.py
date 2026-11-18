@@ -222,6 +222,11 @@ class SerialHardwareBridge:
                         "state": data.get("traffic", "GREEN"),
                         "duration_seconds": data.get("dur", 30)
                     }
+                elif data.get("module") == "traffic_signal":
+                    traffic = {
+                        "state": data.get("state", "RED"),
+                        "duration_seconds": data.get("remaining_seconds", 5)
+                    }
                 return {
                     "sensors": sensors,
                     "traffic_signal": traffic,

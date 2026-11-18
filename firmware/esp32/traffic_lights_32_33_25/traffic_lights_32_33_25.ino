@@ -1,98 +1,177 @@
-/*
- * FogGuard standalone ESP32 traffic-light controller
- *
- * Working ESP32 output mapping:
- *   Red    -> GPIO 32
- *   Yellow -> GPIO 33
- *   Green  -> GPIO 25
- *
- * GPIO 34 was not used because it is input-only on standard ESP32
- * Dev Modules and cannot drive an LED.
- */
-
 #include <Arduino.h>
 
-#define RED_LED_PIN 32
-#define YELLOW_LED_PIN 33
-#define GREEN_LED_PIN 25
+// ============================================================================
+// 1. HARDWARE PIN CONFIGURATION
+// ============================================================================
+// Note: GPIO 34-39 are input-only on ESP32-WROOM-32 and cannot drive LEDs.
+// GPIO 25, 33, and 32 are full bidirectional output-capable pins.
+constexpr uint8_t PIN_LED_RED    = 25;
+constexpr uint8_t PIN_LED_YELLOW = 33;
+constexpr uint8_t PIN_LED_GREEN  = 32;
 
-enum TrafficState {
-  TRAFFIC_RED,
-  TRAFFIC_GREEN,
-  TRAFFIC_YELLOW
+// ============================================================================
+// 2. CONFIGURABLE SIGNAL DURATIONS (IN SECONDS)
+// ============================================================================
+constexpr uint32_t DURATION_RED_SEC    = 5;
+constexpr uint32_t DURATION_GREEN_SEC  = 5;
+constexpr uint32_t DURATION_YELLOW_SEC = 2;
+
+// ============================================================================
+// 3. SERIAL & TIMING CONSTANTS
+// ============================================================================
+constexpr uint32_t SERIAL_BAUD_RATE    = 115200;
+constexpr uint32_t TICK_INTERVAL_MS    = 1000; // 1-second countdown resolution
+
+// Set to true if you want human-readable logs alongside JSON, false for pure JSONL
+constexpr bool ENABLE_HUMAN_DEBUG_LOG  = false; 
+
+// ============================================================================
+// 4. TRAFFIC STATE MACHINE DEFINITION
+// ============================================================================
+enum class TrafficState : uint8_t {
+  RED = 0,
+  GREEN,
+  YELLOW
 };
 
-const unsigned long RED_DURATION_MS = 30000;
-const unsigned long GREEN_DURATION_MS = 25000;
-const unsigned long YELLOW_DURATION_MS = 5000;
+// State variables
+TrafficState currentState = TrafficState::RED;
+uint32_t remainingSeconds = DURATION_RED_SEC;
+uint32_t lastTickMillis   = 0;
 
-TrafficState currentState = TRAFFIC_RED;
-unsigned long stateStartedAt = 0;
+// ============================================================================
+// 5. HELPER FUNCTIONS
+// ============================================================================
 
-void setTrafficLights(TrafficState state) {
-  digitalWrite(RED_LED_PIN, LOW);
-  digitalWrite(YELLOW_LED_PIN, LOW);
-  digitalWrite(GREEN_LED_PIN, LOW);
+/**
+ * Safely switches physical LED outputs so only one LED is active at any time.
+ */
+void applyLedOutputs(TrafficState state) {
+  // Turn all LEDs OFF first to prevent brief overlap during transitions
+  digitalWrite(PIN_LED_RED, LOW);
+  digitalWrite(PIN_LED_YELLOW, LOW);
+  digitalWrite(PIN_LED_GREEN, LOW);
 
+  // Activate the target LED
   switch (state) {
-    case TRAFFIC_RED:
-      digitalWrite(RED_LED_PIN, HIGH);
+    case TrafficState::RED:
+      digitalWrite(PIN_LED_RED, HIGH);
       break;
-    case TRAFFIC_GREEN:
-      digitalWrite(GREEN_LED_PIN, HIGH);
+    case TrafficState::GREEN:
+      digitalWrite(PIN_LED_GREEN, HIGH);
       break;
-    case TRAFFIC_YELLOW:
-      digitalWrite(YELLOW_LED_PIN, HIGH);
+    case TrafficState::YELLOW:
+      digitalWrite(PIN_LED_YELLOW, HIGH);
       break;
   }
 }
 
-unsigned long getStateDurationMs(TrafficState state) {
+/**
+ * Converts the enum state into a strict string literal for JSON serialization.
+ */
+const char* getStateName(TrafficState state) {
   switch (state) {
-    case TRAFFIC_RED:
-      return RED_DURATION_MS;
-    case TRAFFIC_GREEN:
-      return GREEN_DURATION_MS;
-    case TRAFFIC_YELLOW:
-      return YELLOW_DURATION_MS;
+    case TrafficState::RED:    return "RED";
+    case TrafficState::GREEN:  return "GREEN";
+    case TrafficState::YELLOW: return "YELLOW";
+    default:                   return "RED";
   }
-  return 0;
 }
+
+/**
+ * Transmits a single newline-terminated JSON object (JSON Lines protocol).
+ */
+void transmitTelemetry(TrafficState state, uint32_t secondsLeft) {
+  const char* stateStr = getStateName(state);
+
+  // Fixed 96-byte buffer prevents dynamic memory fragmentation
+  char jsonBuffer[96];
+  snprintf(
+    jsonBuffer,
+    sizeof(jsonBuffer),
+    "{\"module\":\"traffic_signal\",\"state\":\"%s\",\"remaining_seconds\":%lu}",
+    stateStr,
+    static_cast<unsigned long>(secondsLeft)
+  );
+
+  Serial.println(jsonBuffer);
+
+  if (ENABLE_HUMAN_DEBUG_LOG) {
+    Serial.printf("Traffic Signal: %s | Remaining: %lu\n", stateStr, static_cast<unsigned long>(secondsLeft));
+  }
+}
+
+/**
+ * Advances the state machine following the strict cycle: RED -> GREEN -> YELLOW -> RED
+ */
+void advanceTrafficState() {
+  switch (currentState) {
+    case TrafficState::RED:
+      currentState     = TrafficState::GREEN;
+      remainingSeconds = DURATION_GREEN_SEC;
+      break;
+
+    case TrafficState::GREEN:
+      currentState     = TrafficState::YELLOW;
+      remainingSeconds = DURATION_YELLOW_SEC;
+      break;
+
+    case TrafficState::YELLOW:
+      currentState     = TrafficState::RED;
+      remainingSeconds = DURATION_RED_SEC;
+      break;
+  }
+
+  applyLedOutputs(currentState);
+}
+
+// ============================================================================
+// 6. ARDUINO LIFECYCLE FUNCTIONS
+// ============================================================================
 
 void setup() {
-  Serial.begin(115200);
+  // 1. Initialize Serial UART0 over USB
+  Serial.begin(SERIAL_BAUD_RATE);
+  
+  // Brief stabilization pause for the USB-UART bridge (CP2102 / CH340)
+  delay(200);
 
-  pinMode(RED_LED_PIN, OUTPUT);
-  pinMode(YELLOW_LED_PIN, OUTPUT);
-  pinMode(GREEN_LED_PIN, OUTPUT);
+  // 2. Configure GPIO pins as digital outputs
+  pinMode(PIN_LED_RED, OUTPUT);
+  pinMode(PIN_LED_YELLOW, OUTPUT);
+  pinMode(PIN_LED_GREEN, OUTPUT);
 
-  digitalWrite(RED_LED_PIN, LOW);
-  digitalWrite(YELLOW_LED_PIN, LOW);
-  digitalWrite(GREEN_LED_PIN, LOW);
+  // 3. Force all LEDs into a known OFF state before starting the cycle
+  digitalWrite(PIN_LED_RED, LOW);
+  digitalWrite(PIN_LED_YELLOW, LOW);
+  digitalWrite(PIN_LED_GREEN, LOW);
 
-  stateStartedAt = millis();
-  setTrafficLights(currentState);
+  // 4. Initialize state machine to RED
+  currentState     = TrafficState::RED;
+  remainingSeconds = DURATION_RED_SEC;
+  applyLedOutputs(currentState);
 
-  Serial.println("FogGuard traffic lights: R=32 Y=33 G=25");
-  Serial.println("GPIO 34 is input-only and cannot drive the green LED.");
+  // 5. Anchor the non-blocking timer and emit the initial state immediately
+  lastTickMillis = millis();
+  transmitTelemetry(currentState, remainingSeconds);
 }
 
 void loop() {
-  if (millis() - stateStartedAt >= getStateDurationMs(currentState)) {
-    stateStartedAt = millis();
+  uint32_t currentMillis = millis();
 
-    switch (currentState) {
-      case TRAFFIC_RED:
-        currentState = TRAFFIC_GREEN;
-        break;
-      case TRAFFIC_GREEN:
-        currentState = TRAFFIC_YELLOW;
-        break;
-      case TRAFFIC_YELLOW:
-        currentState = TRAFFIC_RED;
-        break;
+  // Unsigned subtraction safely handles the ~49.7-day millis() rollover
+  if (currentMillis - lastTickMillis >= TICK_INTERVAL_MS) {
+    // Increment by exact interval to eliminate cumulative timing drift
+    lastTickMillis += TICK_INTERVAL_MS;
+
+    if (remainingSeconds > 1) {
+      remainingSeconds--;
+    } else {
+      // Current state duration completed; transition to next signal
+      advanceTrafficState();
     }
 
-    setTrafficLights(currentState);
+    // Broadcast updated state and countdown over USB Serial
+    transmitTelemetry(currentState, remainingSeconds);
   }
 }

@@ -9,8 +9,9 @@
  *   - ESP32 Pin 16 (RX2) <- Arduino TX
  *   - ESP32 Pin 17 (TX2) -> Arduino RX
  * - Onboard LED: GPIO 2 (Status Indicator)
- * - Traffic LEDs: Red GPIO 32, Yellow GPIO 33, Green GPIO 25
- *   - GPIO 34 is input-only on ESP32-WROOM and cannot drive a green LED.
+ * - Traffic LEDs: Red GPIO 25, Yellow GPIO 33, Green GPIO 32
+ *   - Note: GPIO 34-39 are input-only on ESP32-WROOM and cannot drive LEDs.
+ *   - GPIO 25, 33, and 32 are full bidirectional output-capable pins.
  * 
  * Functional Responsibilities:
  * 1. Connects to Wi-Fi network with persistent auto-reconnect.
@@ -42,10 +43,10 @@ const char* DEVICE_ID     = "fogguard-esp32";
 // Status LED
 #define STATUS_LED 2
 
-// Traffic signal LEDs
-#define TRAFFIC_RED_LED 32
+// Traffic signal LEDs (Red=25, Yellow=33, Green=32)
+#define TRAFFIC_RED_LED 25
 #define TRAFFIC_YELLOW_LED 33
-#define TRAFFIC_GREEN_LED 25
+#define TRAFFIC_GREEN_LED 32
 
 // NTP Server Settings for UTC timestamping
 const char* NTP_SERVER = "pool.ntp.org";

@@ -90,12 +90,18 @@ def parse_line(line: str):
                     "dist": dist,
                     "det": det,
                 })
+            traffic_state = data.get("traffic")
+            dur = data.get("dur", 30)
+            if data.get("module") == "traffic_signal":
+                traffic_state = data.get("state")
+                dur = data.get("remaining_seconds", 5)
+
             return {
                 "sensors": sensors,
                 "seq": data.get("seq"),
                 "uptime_ms": data.get("up") or data.get("uptime_ms"),
-                "traffic": data.get("traffic"),
-                "dur": data.get("dur", 30),
+                "traffic": traffic_state,
+                "dur": dur,
             }
         except Exception:
             pass
