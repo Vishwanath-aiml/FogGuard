@@ -44,7 +44,7 @@ export function SimulationControl() {
 
   return (
     <div
-      className="rounded-xl border p-3 flex items-center gap-4 flex-wrap"
+      className="dashboard-simulation rounded-xl border p-3 flex items-center gap-4 flex-wrap"
       style={{ background: 'rgba(6, 15, 46, 0.7)', borderColor: 'rgba(13, 32, 112, 0.5)' }}
     >
       <div className="flex items-center gap-2 text-sm font-semibold text-cyan-400">

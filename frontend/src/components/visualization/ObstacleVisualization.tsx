@@ -515,21 +515,6 @@ export function ObstacleVisualization({ sensors }: ObstacleVisualizationProps) {
         </button>
       </div>
 
-      {/* Legend overlay */}
-      <div className="absolute bottom-3 right-3 flex flex-col gap-1 text-xs bg-slate-900/80 backdrop-blur-md p-2.5 rounded-lg border border-slate-800 z-10">
-        {[
-          { level: 'CRITICAL', color: '#ef4444', label: '< 50cm' },
-          { level: 'WARNING', color: '#f97316', label: '50–100cm' },
-          { level: 'CAUTION', color: '#eab308', label: '100–150cm' },
-          { level: 'SAFE', color: '#22c55e', label: '> 150cm' },
-        ].map(({ level, color, label }) => (
-          <div key={level} className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-sm shadow-sm" style={{ backgroundColor: color }} />
-            <span className="text-slate-300 font-medium">{level}</span>
-            <span className="text-slate-500">{label}</span>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

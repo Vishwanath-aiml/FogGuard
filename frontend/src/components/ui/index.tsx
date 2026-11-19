@@ -1,135 +1,123 @@
-// Reusable UI components
-import React from 'react';
-import { cn } from '../../utils';
+import { Check } from 'lucide-react';
+import type { ButtonHTMLAttributes, ReactNode } from 'react';
+import type { SensorReading, WarningEvent, WarningLevel } from '../../types';
+import { ZONE_DISPLAY } from '../../types';
+import { cn, formatDistance, formatTimeAgo, warningLevelBg } from '../../utils';
 
-// ── Card ──────────────────────────────────────────────────────────────────────
 interface CardProps {
-  children: React.ReactNode;
+  children: ReactNode;
   className?: string;
   title?: string;
-  titleIcon?: React.ReactNode;
-  headerRight?: React.ReactNode;
+  titleIcon?: ReactNode;
+  headerRight?: ReactNode;
 }
+
 export function Card({ children, className, title, titleIcon, headerRight }: CardProps) {
   return (
-    <div
-      className={cn('rounded-xl border overflow-hidden shadow-lg shadow-black/20', className)}
-      style={{ background: 'rgba(6, 15, 46, 0.75)', borderColor: 'rgba(13, 32, 112, 0.45)' }}
-    >
+    <section className={cn('ui-card', className)}>
       {title && (
-        <div className="flex items-center justify-between px-4 py-2.5 border-b"
-          style={{ borderColor: 'rgba(13, 32, 112, 0.4)', background: 'rgba(2, 8, 24, 0.3)' }}>
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-200 uppercase tracking-wide">
+        <div className="ui-card-header">
+          <div className="ui-card-title">
             {titleIcon}
-            {title}
+            <span>{title}</span>
           </div>
           {headerRight}
         </div>
       )}
-      <div className="p-3.5">{children}</div>
-    </div>
+      <div className="ui-card-body">{children}</div>
+    </section>
   );
 }
 
-// ── Badge ─────────────────────────────────────────────────────────────────────
 interface BadgeProps {
-  children: React.ReactNode;
+  children: ReactNode;
   variant?: 'default' | 'critical' | 'warning' | 'caution' | 'safe' | 'info';
   className?: string;
 }
-const BADGE_STYLES: Record<string, string> = {
-  default: 'bg-slate-500/20 border-slate-500/30 text-slate-300',
-  critical: 'bg-red-500/20 border-red-500/30 text-red-400',
-  warning: 'bg-orange-500/20 border-orange-500/30 text-orange-400',
-  caution: 'bg-yellow-500/20 border-yellow-500/30 text-yellow-400',
-  safe: 'bg-green-500/20 border-green-500/30 text-green-400',
-  info: 'bg-cyan-500/20 border-cyan-500/30 text-cyan-400',
+
+const BADGE_STYLES: Record<NonNullable<BadgeProps['variant']>, string> = {
+  default: 'bg-slate-500/15 border-slate-500/25 text-slate-300',
+  critical: 'bg-red-500/15 border-red-500/25 text-red-400',
+  warning: 'bg-orange-500/15 border-orange-500/25 text-orange-400',
+  caution: 'bg-yellow-500/15 border-yellow-500/25 text-yellow-400',
+  safe: 'bg-green-500/15 border-green-500/25 text-green-400',
+  info: 'bg-blue-500/15 border-blue-500/25 text-blue-400',
 };
+
 export function Badge({ children, variant = 'default', className }: BadgeProps) {
   return (
-    <span className={cn('px-2 py-0.5 text-xs font-medium border rounded-full', BADGE_STYLES[variant], className)}>
+    <span className={cn('inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium', BADGE_STYLES[variant], className)}>
       {children}
     </span>
   );
 }
 
-// ── Stat Card ─────────────────────────────────────────────────────────────────
 interface StatCardProps {
   label: string;
   value: string | number;
-  icon?: React.ReactNode;
+  icon?: ReactNode;
   color?: string;
   sub?: string;
 }
-export function StatCard({ label, value, icon, color = '#22d3ee', sub }: StatCardProps) {
+
+export function StatCard({ label, value, icon, color = '#60a5fa', sub }: StatCardProps) {
   return (
-    <div
-      className="rounded-xl p-4 flex flex-col gap-1.5 border relative overflow-hidden group transition-all duration-300 hover:border-opacity-80"
-      style={{
-        background: 'rgba(6, 15, 46, 0.75)',
-        borderColor: 'rgba(13, 32, 112, 0.5)',
-        borderLeftWidth: '3px',
-        borderLeftColor: color,
-      }}
-    >
-      <div className="flex items-center gap-2">
-        {icon && <span className="opacity-80" style={{ color }}>{icon}</span>}
-        <span className="text-[11px] text-slate-400 uppercase tracking-wider font-medium">{label}</span>
+    <section className="stat-card">
+      <div className="stat-card-label">
+        {icon && <span style={{ color }}>{icon}</span>}
+        <span>{label}</span>
       </div>
-      <div className="text-2xl font-bold font-mono tracking-tight" style={{ color }}>
-        {value}
-      </div>
-      {sub && <div className="text-[11px] text-slate-500 truncate">{sub}</div>}
-    </div>
+      <div className="stat-card-value" style={{ color }}>{value}</div>
+      {sub && <div className="stat-card-sub">{sub}</div>}
+    </section>
   );
 }
 
-// ── Status Dot ────────────────────────────────────────────────────────────────
-interface StatusDotProps {
-  status: string;
-  label?: string;
-}
 const STATUS_COLORS: Record<string, string> = {
   CONNECTED: '#22c55e',
-  SIMULATED: '#22d3ee',
+  SIMULATED: '#60a5fa',
   DISCONNECTED: '#ef4444',
-  UNKNOWN: '#94a3b8',
+  UNKNOWN: '#9ca3af',
   ERROR: '#ef4444',
 };
-export function StatusDot({ status, label }: StatusDotProps) {
-  const color = STATUS_COLORS[status] ?? '#94a3b8';
+
+export function StatusDot({ status, label }: { status: string; label?: string }) {
+  const color = STATUS_COLORS[status] ?? STATUS_COLORS.UNKNOWN;
+
   return (
     <div className="flex items-center gap-2">
-      <span
-        className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-        style={{
-          backgroundColor: color,
-          boxShadow: `0 0 6px ${color}80`,
-          animation: status === 'CONNECTED' || status === 'SIMULATED' ? 'pulse 2s infinite' : undefined,
-        }}
-      />
-      {label && <span className="text-sm" style={{ color }}>{label || status}</span>}
+      <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ backgroundColor: color }} />
+      {label && <span className="text-sm" style={{ color }}>{label}</span>}
     </div>
   );
 }
 
-// ── Button ────────────────────────────────────────────────────────────────────
-interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
   size?: 'sm' | 'md';
 }
-const BTN_STYLES: Record<string, string> = {
-  primary: 'bg-cyan-500 hover:bg-cyan-400 text-white border-transparent',
-  secondary: 'bg-blue-600 hover:bg-blue-500 text-white border-transparent',
+
+const BUTTON_STYLES: Record<NonNullable<ButtonProps['variant']>, string> = {
+  primary: 'bg-blue-500 hover:bg-blue-400 text-white border-transparent',
+  secondary: 'bg-slate-700 hover:bg-slate-600 text-slate-100 border-slate-600',
   danger: 'bg-red-600 hover:bg-red-500 text-white border-transparent',
-  ghost: 'bg-transparent hover:bg-white/5 text-slate-300 border-slate-700',
+  ghost: 'bg-transparent hover:bg-white/5 text-slate-300 border-transparent',
 };
-export function Button({ children, variant = 'primary', size = 'md', className, ...props }: ButtonProps) {
+
+export function Button({
+  children,
+  variant = 'primary',
+  size = 'md',
+  className,
+  type = 'button',
+  ...props
+}: ButtonProps) {
   return (
     <button
+      type={type}
       className={cn(
-        'flex items-center gap-2 font-medium rounded-lg border transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed',
-        BTN_STYLES[variant],
+        'inline-flex items-center justify-center gap-2 rounded-lg border font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        BUTTON_STYLES[variant],
         size === 'sm' ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm',
         className,
       )}
@@ -140,64 +128,61 @@ export function Button({ children, variant = 'primary', size = 'md', className, 
   );
 }
 
-// ── Loading Spinner ───────────────────────────────────────────────────────────
 export function Spinner({ size = 16 }: { size?: number }) {
   return (
     <div
-      className="border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin"
+      className="animate-spin rounded-full border-2 border-blue-400/25 border-t-blue-400"
       style={{ width: size, height: size }}
+      role="status"
+      aria-label="Loading"
     />
   );
 }
 
-// ── Sensor Row ────────────────────────────────────────────────────────────────
-import type { SensorReading } from '../../types';
-import { ZONE_DISPLAY } from '../../types';
-import { formatDistance, warningLevelBg } from '../../utils';
+const SENSOR_ROW_CLASSES: Record<WarningLevel, string> = {
+  CRITICAL: 'sensor-row-critical',
+  WARNING: 'sensor-row-warning',
+  CAUTION: 'sensor-row-caution',
+  SAFE: 'sensor-row-safe',
+  CLEAR: 'sensor-row-clear',
+};
 
 export function SensorRow({ sensor }: { sensor: SensorReading }) {
-  const zoneName = ZONE_DISPLAY[sensor.zone as keyof typeof ZONE_DISPLAY] ?? sensor.zone;
-  const style = warningLevelBg(sensor.warning_level);
+  const zoneName = ZONE_DISPLAY[sensor.zone] ?? sensor.zone;
 
   return (
-    <div className={cn('flex items-center justify-between p-2 rounded-lg border transition-all duration-200', style)}>
-      <div className="flex items-center gap-2.5">
-        <span className="font-mono text-xs font-bold w-7 text-center px-1 py-0.5 rounded bg-black/20">{sensor.sensor_id}</span>
-        <span className="text-xs text-slate-400 truncate">{zoneName}</span>
-      </div>
-      <div className="flex items-center gap-2.5">
-        <span className="font-mono text-sm font-semibold tabular-nums">{formatDistance(sensor.distance_cm)}</span>
-        <span className="text-[10px] font-bold w-16 text-right uppercase tracking-wide">{sensor.warning_level}</span>
-      </div>
+    <div className={cn('sensor-row', SENSOR_ROW_CLASSES[sensor.warning_level])}>
+      <span className="sensor-row-name">{zoneName}</span>
+      <span className="sensor-row-distance">{formatDistance(sensor.distance_cm)}</span>
     </div>
   );
 }
-
-// ── Warning Card ──────────────────────────────────────────────────────────────
-import type { WarningEvent } from '../../types';
-import { formatTimeAgo } from '../../utils';
-import { Check } from 'lucide-react';
 
 interface WarningCardProps {
   warning: WarningEvent;
   onAck?: (id: number) => void;
 }
+
 export function WarningCard({ warning, onAck }: WarningCardProps) {
-  const style = warningLevelBg(warning.warning_level as any);
   return (
-    <div className={cn('flex items-start gap-3 p-3 rounded-lg border', style,
-      warning.acknowledged ? 'opacity-50' : '')}>
-      <div className="flex-1 min-w-0">
+    <div className={cn(
+      'flex items-start gap-3 rounded-lg border p-2.5',
+      warningLevelBg(warning.warning_level),
+      warning.acknowledged && 'opacity-50',
+    )}>
+      <div className="min-w-0 flex-1">
         <p className="text-sm font-medium leading-snug">{warning.warning_message}</p>
-        <p className="text-xs text-slate-500 mt-1">{formatTimeAgo(warning.timestamp)}</p>
+        <p className="mt-1 text-xs text-slate-400">{formatTimeAgo(warning.timestamp)}</p>
       </div>
       {!warning.acknowledged && onAck && (
         <button
+          type="button"
           onClick={() => onAck(warning.id)}
-          className="p-1 rounded hover:bg-white/10 transition-colors flex-shrink-0"
+          className="flex-shrink-0 rounded p-1 transition-colors hover:bg-white/10"
           title="Acknowledge"
+          aria-label="Acknowledge warning"
         >
-          <Check className="w-3.5 h-3.5" />
+          <Check className="h-3.5 w-3.5" />
         </button>
       )}
     </div>
