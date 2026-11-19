@@ -178,6 +178,54 @@ async def receive_telemetry(
     return {"status": "ok", "processed_sensors": len(payload.sensors)}
 
 
+@router.post("/iot/traffic_signal", summary="Receive independent traffic signal state from ESP32")
+async def receive_traffic_signal(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Receives autonomous traffic signal state emitted by the standalone ESP32 smart traffic light.
+    Broadcasts real-time light status (RED/GREEN/YELLOW) and countdown to windshield HUD / dashboard.
+    """
+    global _last_telemetry
+
+    raw_state = str(payload.get("state") or payload.get("traffic") or "RED").upper()
+    dur = payload.get("remaining_seconds") or payload.get("duration_seconds") or payload.get("dur") or 5
+
+    traffic_data = {
+        "state": raw_state,
+        "duration_seconds": dur,
+    }
+
+    # If simulation was running, stop it so physical hardware takes over exclusively
+    if simulation_engine.is_running:
+        await simulation_engine.stop()
+        logger.info("Paused simulation engine: physical ESP32 traffic signal active")
+
+    sensors = _last_telemetry.get("sensors", [])
+    now = datetime.now(timezone.utc)
+
+    broadcast_msg = {
+        "type": "telemetry",
+        "source": "hardware",
+        "timestamp": now.isoformat(),
+        "sensors": sensors,
+        "traffic_signal": traffic_data,
+        "new_warnings": [],
+        "simulation_mode": False,
+        "perf": {
+            "seq": _last_telemetry.get("perf", {}).get("seq", 0),
+            "uptime_ms": 0,
+            "backend_proc_ms": 0.1,
+            "host_tx_ms": round(time.time() * 1000, 2),
+        },
+    }
+
+    _last_telemetry = broadcast_msg
+    await manager.broadcast(broadcast_msg)
+    return {"status": "ok", "traffic_signal": traffic_data}
+
+
 @router.get("/iot/diagnostics/latency", summary="Get real-time latency and throughput diagnostics")
 async def get_latency_diagnostics():
     """Returns high-resolution P50, P95, P99 latency percentiles, telemetry FPS, and drop metrics."""
